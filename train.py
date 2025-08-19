@@ -48,8 +48,20 @@ def main():
         "import requests\n\nresponse = requests.post('https://httpbin.org/post', data = {'key':'value'})\nprint(response.json())"
     ]
     
+    # Create a targeted dataset for the new skill (Stripe API)
+    stripe_dataset = [
+        "import stripe\n\nstripe.api_key = 'YOUR_API_KEY'\n\ncharge = stripe.Charge.create(\n  amount=2000,\n  currency='usd',\n  source='tok_mastercard',\n  description='My First Test Charge (created for API docs)',\n)",
+        "import stripe\n\nstripe.api_key = 'YOUR_API_KEY'\n\ncustomer = stripe.Customer.create(\n  description='My First Test Customer (created for API docs)',\n)"
+    ]
+    
+    # Create a targeted dataset for the new skill (Flask)
+    flask_dataset = [
+        "from flask import Flask\n\napp = Flask(__name__)\n\n@app.route('/')\ndef hello_world():\n    return 'Hello, World!'",
+        "from flask import Flask, request\n\napp = Flask(__name__)\n\n@app.route('/login', methods=['GET', 'POST'])\ndef login():\n    if request.method == 'POST':\n        return 'POST request'\n    else:\n        return 'GET request'"
+    ]
+    
     python_code = [example["output"] for example in python_dataset.select(range(1000))]
-    data_stream = [python_code, requests_dataset]
+    data_stream = [python_code, requests_dataset, stripe_dataset, flask_dataset]
 
     # 3. Configure the training arguments
     training_args = TrainingArguments(
@@ -112,6 +124,13 @@ def main():
             
             # Update the expert maturity
             model.router.set_expert_maturity(model.expert_manager.num_experts - 1, 1)
+            
+            # Log metrics
+            wandb.log({
+                "train_loss": trainer.state.log_history[-1]["loss"],
+                "learning_rate": trainer.state.log_history[-1]["learning_rate"],
+                "num_experts": model.expert_manager.num_experts,
+            })
 
     # 8. Final Evaluation
     print("\n--- Final Evaluation ---")
