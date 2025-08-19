@@ -1,0 +1,20 @@
+# Virtual Environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Hugging Face Trainer output
+results/
+logs/
+
+# Weights & Biases
+wandb/
+
+# IDE files
+.vscode/
+.idea/
+
+# Test files
+peft_test.py
