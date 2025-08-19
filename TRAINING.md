@@ -35,6 +35,36 @@ The router is trained in parallel with the experts.
 
 The `main.py` script now implements a continual learning loop that simulates a continuous stream of data, with new skills being introduced over time. The `TwoPhaseLRScheduler` is used to implement the high-rate seeding and low-rate consolidation phases, and the `DynamicHybridRouter` switches between dense and sparse routing based on the maturity of the experts.
 
+## Proof-of-Concept Training Plan
+
+This section outlines a smaller, more focused training plan to prove the concept of DyLoRA.
+
+### 1. Foundational Skill: Python Programming
+
+The first phase will focus on building a foundational understanding of Python.
+
+**Training Dataset:**
+
+*   **Dataset:** A curated subset of the **Code Alpaca** dataset, filtered to only include Python code.
+*   **Objective:** Train a single LoRA expert on this dataset to serve as the "base" Python expert.
+
+### 2. Continual Skill Acquisition: Web Scraping with `requests`
+
+The second phase will introduce a new, distinct skill: web scraping with the `requests` library.
+
+**Training Dataset:**
+
+*   **Dataset:** A small, targeted dataset of Python code snippets that use the `requests` library for web scraping. This dataset can be generated using a large language model like Gemini.
+*   **Objective:** Train a new LoRA expert on this dataset to teach the model the new skill.
+
+### 3. Evaluation
+
+*   **Foundational Skill:** Evaluate the model's ability to solve basic Python programming problems using the **MBPP (Mostly Basic Python Problems)** dataset.
+*   **New Skill:** Evaluate the model's ability to solve web scraping problems using a custom evaluation dataset.
+*   **Forgetting:** Evaluate the model's performance on the MBPP dataset after learning the new skill to ensure that it has not forgotten the foundational knowledge.
+
+This proof-of-concept training plan will allow us to validate the core principles of the DyLoRA-MoE architecture in a more controlled and efficient manner.
+
 ## Detailed Training Plan for Software Development Excellence
 
 This section outlines a comprehensive, phased plan to train a DyLoRA-MoE model to excel at software development tasks.
@@ -131,7 +161,8 @@ The necessary code infrastructure is in place to begin the training plan. The `p
 
 **Next Steps:**
 
-1.  **Acquire Datasets:** Run the `prepare_data.py` script to download The Stack and Code Alpaca datasets. Please be aware that The Stack is a very large dataset and will require significant disk space and download time.
-2.  **Launch Training:** Once the datasets are downloaded, run the `main.py` script to begin the training process.
-3.  **Monitor Training:** Monitor the training process and results using the Weights & Biases dashboard.
+1.  **Set up a cloud GPU:** The local hardware is not sufficient to train this model. You will need to set up a cloud GPU instance on a platform like Google Cloud, AWS, or Azure. A machine with a single NVIDIA A100 or H100 GPU should be sufficient for the proof-of-concept.
+2.  **Set up the environment:** Once you have a cloud GPU instance, you will need to clone the repository, create a virtual environment, and install the required dependencies.
+3.  **Launch Training:** Run the `main.py` script to begin the training process.
+4.  **Monitor Training:** Monitor the training process and results using the Weights & Biases dashboard.
 

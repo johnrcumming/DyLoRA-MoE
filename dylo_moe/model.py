@@ -105,15 +105,20 @@ class DyLoRA_MoE(nn.Module):
 
         return (loss, outputs) if loss is not None else outputs
 
-    def add_new_skill(self, skill_data: torch.Tensor):
+    def add_new_skill(self, skill_data: torch.Tensor, batch_size: int = 16):
         """
         Adds a new skill to the model.
         """
         # 1. Detect if the skill is novel
         # Get the router output for the new skill data
         with torch.no_grad():
-            outputs = self.foundation_model(skill_data, attention_mask=(skill_data != 0), output_hidden_states=True)
-            hidden_states = outputs.hidden_states[-1]
+            all_hidden_states = []
+            for i in range(0, skill_data.size(0), batch_size):
+                batch = skill_data[i:i+batch_size]
+                outputs = self.foundation_model(batch, attention_mask=(batch != 0), output_hidden_states=True)
+                all_hidden_states.append(outputs.hidden_states[-1])
+            
+            hidden_states = torch.cat(all_hidden_states, dim=0)
             router_output = self.router(hidden_states)
 
         is_novel = self.novelty_detector.is_novel(router_output)
