@@ -20,11 +20,12 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     
-    skill_1_data = ["Hello, world!", "This is a test.", "DyLoRA-MoE is a cool architecture."]
-    skill_2_data = ["This is a new skill.", "Learning new things is fun.", "Continual learning is important."]
-    skill_3_data = ["The router is a key component.", "It directs traffic to the experts.", "Mixture-of-Experts is a powerful technique."]
+    # Load the datasets
+    from data.prepare_data import download_the_stack, download_code_alpaca
+    skill_1_data = download_the_stack()
+    skill_2_data = download_code_alpaca()
     
-    data_stream = [skill_1_data, skill_2_data, skill_3_data]
+    data_stream = [skill_1_data, skill_2_data]
 
     # 3. Configure the training arguments
     training_args = TrainingArguments(
