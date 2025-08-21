@@ -37,18 +37,19 @@ worker_pool_specs = [
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
             "command": ["python", "poc_train.py"],
             "args": [],
+            "env": [{"name": "WANDB_API_KEY", "value": wandb_api_key}],
         },
     }
 ]
 
 # Define the custom job
 job = aiplatform.CustomJob(
-    display_name="software-development-training-job",
+    display_name="proof-of-concept-training-job",
     worker_pool_specs=worker_pool_specs,
 )
 
 # Run the training job
-print("Submitting the software development training job...")
+print("Submitting the proof-of-concept training job...")
 job.run(
     service_account=f"dylora-moe@{PROJECT_ID}.iam.gserviceaccount.com",
     # The 'use_spot_vms' parameter is not directly in the run method for CustomJob,
@@ -63,4 +64,4 @@ job.run(
     restart_job_on_worker_restart=True,
 )
 
-print("Software development training job submitted successfully.")
+print("Proof of concept training job submitted successfully.")

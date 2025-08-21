@@ -37,6 +37,7 @@ worker_pool_specs = [
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
             "command": ["python", "train.py"],
             "args": [],
+            "env": [{"name": "WANDB_API_KEY", "value": wandb_api_key}],
         },
     }
 ]

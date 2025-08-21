@@ -116,11 +116,22 @@ def main():
     print(f"Final MBPP Loss: {final_loss}")
     wandb.log({"final_mbpp_loss": final_loss})
 
-    # 10. Print the final model architecture and trainable parameters
+    # 10. Save and upload the trained LoRA weights
+    print("\n--- Saving and Uploading LoRA Weights ---")
+    weights_path = "./results_full/dylo_moe_weights.pt"
+    torch.save(model.state_dict(), weights_path)
+    artifact = wandb.Artifact('dylo-moe-weights', type='model')
+    artifact.add_file(weights_path)
+    wandb.log_artifact(artifact)
+    print("LoRA weights saved and uploaded to wandb.")
+
+    # 11. Print the final model architecture and trainable parameters
     print("\n--- Final Model Architecture ---")
     print(model)
     print("\n--- Trainable Parameters ---")
     print_trainable_parameters(model)
+
+    wandb.finish()
 
 if __name__ == "__main__":
     main()

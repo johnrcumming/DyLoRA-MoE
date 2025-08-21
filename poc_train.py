@@ -104,7 +104,9 @@ def main():
     wandb.log({"initial_mbpp_loss": initial_loss})
 
     # 7. Continual learning loop
-    torch.mps.empty_cache()
+    # Continual learning loop
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
     for i, skill_data in enumerate(data_stream):
         print(f"\n--- Processing Skill {i+1} ---")
         
