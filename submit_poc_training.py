@@ -35,7 +35,7 @@ worker_pool_specs = [
         "replica_count": 1,
         "container_spec": {
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
-            "command": ["python", "software_development_trainer.py"],
+            "command": ["python", "poc_train.py"],
             "args": [],
         },
     }
