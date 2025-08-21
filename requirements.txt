@@ -6,3 +6,4 @@ scikit-learn
 numpy
 datasets
 wandb
+python-dotenv
