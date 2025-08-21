@@ -1,5 +1,6 @@
 import torch
 import os
+import argparse
 os.environ["WANDB_DISABLED"] = "false"
 import wandb
 from transformers import AutoTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling
@@ -25,7 +26,7 @@ def evaluate(model, tokenizer, dataset):
             total_loss += loss.item()
     return total_loss / len(dataset)
 
-def main():
+def main(args):
     # 1. Initialize wandb
     wandb.init(project="dylo-moe-software-development")
 
@@ -66,7 +67,7 @@ def main():
     # 3. Configure the training arguments
     training_args = TrainingArguments(
         output_dir="./results",
-        num_train_epochs=10,
+        num_train_epochs=args.num_epochs,
         per_device_train_batch_size=1,
         logging_dir='./logs',
         save_safetensors=False,
@@ -119,7 +120,7 @@ def main():
         device = trainer.model.foundation_model.device
         is_novel = model.add_new_skill(tokenized_data["input_ids"].to(device))
         
-        if is_novel:
+        if True: # Forcing training for POC
             # Train on the new skill
             trainer.train_dataset = dataset
             trainer.train()
@@ -140,11 +141,25 @@ def main():
     print(f"Final MBPP Loss: {final_loss}")
     wandb.log({"final_mbpp_loss": final_loss})
 
-    # 9. Print the final model architecture and trainable parameters
+    # 9. Save and upload the trained LoRA weights
+    print("\n--- Saving and Uploading LoRA Weights ---")
+    weights_path = "./results/dylo_moe_weights_poc.pt"
+    torch.save(model.state_dict(), weights_path)
+    artifact = wandb.Artifact('dylo-moe-weights-poc', type='model')
+    artifact.add_file(weights_path)
+    wandb.log_artifact(artifact)
+    print("LoRA weights saved and uploaded to wandb.")
+
+    # 10. Print the final model architecture and trainable parameters
     print("\n--- Final Model Architecture ---")
     print(model)
     print("\n--- Trainable Parameters ---")
     print_trainable_parameters(model)
 
+    wandb.finish()
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
+    args = parser.parse_args()
+    main(args)

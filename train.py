@@ -1,5 +1,6 @@
 import torch
 import os
+import argparse
 os.environ["WANDB_DISABLED"] = "false"
 import wandb
 from transformers import AutoTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling
@@ -25,7 +26,7 @@ def evaluate(model, tokenizer, dataset):
             total_loss += loss.item()
     return total_loss / len(dataset)
 
-def main():
+def main(args):
     # 1. Initialize wandb
     wandb.init(project="dylo-moe-software-development-full")
 
@@ -41,18 +42,13 @@ def main():
     code_alpaca_dataset = load_dataset("the-stack-dedup/code-alpaca-v1", split="train")
     mbpp_dataset = download_mbpp()
 
-    # Create a data stream of different programming languages and tasks
-    data_stream = [
-        [ex["content"] for ex in code_alpaca_dataset.filter(lambda ex: ex["lang"] == "python").select(range(10000))],
-        [ex["content"] for ex in code_alpaca_dataset.filter(lambda ex: ex["lang"] == "javascript").select(range(10000))],
-        [ex["content"] for ex in code_alpaca_dataset.filter(lambda ex: ex["lang"] == "java").select(range(10000))],
-        [ex["content"] for ex in code_alpaca_dataset.filter(lambda ex: ex["lang"] == "go").select(range(10000))],
-    ]
+    # Use the full dataset for the data stream
+    data_stream = [[ex["content"] for ex in code_alpaca_dataset]]
 
     # 4. Configure the training arguments
     training_args = TrainingArguments(
         output_dir="./results_full",
-        num_train_epochs=5, # More epochs for full training
+        num_train_epochs=args.num_epochs, # More epochs for full training
         per_device_train_batch_size=4, # Larger batch size
         logging_dir='./logs_full',
         save_safetensors=True,
@@ -98,7 +94,7 @@ def main():
         device = trainer.model.foundation_model.device
         is_novel = model.add_new_skill(tokenized_data["input_ids"].to(device))
         
-        if is_novel:
+        if True: # Forcing training for now
             trainer.train_dataset = dataset
             trainer.train()
             
@@ -134,4 +130,7 @@ def main():
     wandb.finish()
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs.")
+    args = parser.parse_args()
+    main(args)
