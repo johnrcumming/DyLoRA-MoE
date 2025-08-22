@@ -15,10 +15,13 @@ class DyLoRA_MoE(nn.Module):
         # 1. Load and freeze the foundation model
         self.foundation_model = AutoModelForCausalLM.from_pretrained(model_name)
         
+        # Get the transformer component
+        self.transformer = self._get_transformer()
+        
         # Untie the weights of the lm_head
         if self.foundation_model.config.tie_word_embeddings:
             # Get the weights from the token embeddings
-            lm_head_weights = self.foundation_model.transformer.wte.weight
+            lm_head_weights = self.transformer.wte.weight
             
             # Create a new lm_head with the same dimensions
             self.foundation_model.lm_head = nn.Linear(
@@ -50,12 +53,59 @@ class DyLoRA_MoE(nn.Module):
         # 4. Initialize the Novelty Detector
         self.novelty_detector = NoveltyDetector()
 
+    def _get_transformer(self):
+        """
+        Get the transformer component from different model architectures.
+        """
+        # Common transformer attribute names for different model types
+        transformer_attrs = [
+            'transformer',      # GPT-2, GPT-Neo, GPT-J
+            'model',           # LLaMA, Mistral, Phi
+            'gpt_neox',        # GPT-NeoX
+            'bert',            # BERT-based models
+            'roberta',         # RoBERTa
+            'deberta',         # DeBERTa
+            'encoder',         # T5 encoder
+            'decoder',         # T5 decoder
+        ]
+        
+        for attr in transformer_attrs:
+            if hasattr(self.foundation_model, attr):
+                return getattr(self.foundation_model, attr)
+        
+        # If none of the common attributes are found, try to find it dynamically
+        for name, module in self.foundation_model.named_children():
+            if hasattr(module, 'wte') or hasattr(module, 'embed_tokens'):
+                return module
+        
+        raise AttributeError(f"Could not find transformer component in {type(self.foundation_model).__name__}")
+
+    def _get_hidden_size(self):
+        """
+        Get the hidden size from different model configurations.
+        """
+        config = self.foundation_model.config
+        
+        # Common hidden size attribute names
+        hidden_size_attrs = [
+            'hidden_size',      # Most models
+            'n_embd',          # GPT-2 style
+            'd_model',         # T5 style
+            'dim',             # Some custom models
+        ]
+        
+        for attr in hidden_size_attrs:
+            if hasattr(config, attr):
+                return getattr(config, attr)
+        
+        raise AttributeError(f"Could not find hidden size in {type(config).__name__}")
+
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None, labels: torch.Tensor | None = None):
         """
         Forward pass of the DyLoRA-MoE model.
         """
         # Get the transformer outputs without the language modeling head
-        transformer_outputs = self.foundation_model.transformer(
+        transformer_outputs = self.transformer(
             input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
@@ -77,8 +127,8 @@ class DyLoRA_MoE(nn.Module):
             # Set the active expert
             self.expert_manager.set_active_expert(i)
             
-            # Get the output from the foundation model with the active expert
-            expert_output = self.foundation_model.transformer(input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states[-1]
+            # Get the output from the transformer with the active expert
+            expert_output = self.transformer(input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states[-1]
             
             # Apply the routing weights
             final_hidden_states += routing_weights[:, :, i].unsqueeze(-1) * expert_output
