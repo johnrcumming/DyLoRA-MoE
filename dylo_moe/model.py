@@ -9,11 +9,11 @@ class DyLoRA_MoE(nn.Module):
     """
     Implements the Dynamic LoRA-based Mixture-of-Experts (DyLoRA-MoE) architecture.
     """
-    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 8, lora_alpha: int = 16, lora_dropout: float = 0.1):
+    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 8, lora_alpha: int = 16, lora_dropout: float = 0.1, token: str | None = None):
         super(DyLoRA_MoE, self).__init__()
 
         # 1. Load and freeze the foundation model
-        self.foundation_model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.foundation_model = AutoModelForCausalLM.from_pretrained(model_name, token=token)
         
         # Get the transformer component
         self.transformer = self._get_transformer()
@@ -21,11 +21,11 @@ class DyLoRA_MoE(nn.Module):
         # Untie the weights of the lm_head
         if self.foundation_model.config.tie_word_embeddings:
             # Get the weights from the token embeddings
-            lm_head_weights = self.transformer.wte.weight
+            lm_head_weights = self.transformer.embed_tokens.weight
             
             # Create a new lm_head with the same dimensions
             self.foundation_model.lm_head = nn.Linear(
-                self.foundation_model.config.n_embd,
+                self.foundation_model.config.hidden_size,
                 self.foundation_model.config.vocab_size,
                 bias=False
             )
@@ -75,7 +75,7 @@ class DyLoRA_MoE(nn.Module):
         
         # If none of the common attributes are found, try to find it dynamically
         for name, module in self.foundation_model.named_children():
-            if hasattr(module, 'wte') or hasattr(module, 'embed_tokens'):
+            if hasattr(module, 'embed_tokens'):
                 return module
         
         raise AttributeError(f"Could not find transformer component in {type(self.foundation_model).__name__}")

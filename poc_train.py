@@ -31,11 +31,12 @@ def main(args):
     wandb.init(project="dylo-moe-software-development")
 
     # 2. Instantiate the model
-    model_name = "distilgpt2"  # Using a smaller model for testing
-    model = DyLoRA_MoE(model_name, num_experts=1)
+    model_name = "google/codegemma-2b"
+    hf_token = os.environ.get("HF_TOKEN")
+    model = DyLoRA_MoE(model_name, num_experts=1, token=hf_token)
 
     # 2. Create a simulated data stream
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
     
     # Load the datasets

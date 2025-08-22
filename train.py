@@ -31,11 +31,12 @@ def main(args):
     wandb.init(project="dylo-moe-software-development-full")
 
     # 2. Instantiate the model
-    model_name = "codellama/CodeLlama-7b-hf"
-    model = DyLoRA_MoE(model_name, num_experts=4) # Start with more experts
+    model_name = "google/codegemma-2b"
+    hf_token = os.environ.get("HF_TOKEN")
+    model = DyLoRA_MoE(model_name, num_experts=4, token=hf_token) # Start with more experts
 
     # 3. Create a data stream
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
     
     # Load larger, more diverse datasets

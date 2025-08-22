@@ -24,6 +24,11 @@ wandb_api_key = os.environ.get("WANDB_API_KEY")
 if not wandb_api_key:
     raise ValueError("WANDB_API_KEY environment variable not set.")
 
+# Get HF_TOKEN from environment
+hf_token = os.environ.get("HF_TOKEN")
+if not hf_token:
+    raise ValueError("HF_TOKEN environment variable not set.")
+
 # Define the worker pool spec for a Spot VM
 worker_pool_specs = [
     {
@@ -37,7 +42,10 @@ worker_pool_specs = [
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
             "command": ["python", "train.py"],
             "args": [],
-            "env": [{"name": "WANDB_API_KEY", "value": wandb_api_key}],
+            "env": [
+                {"name": "WANDB_API_KEY", "value": wandb_api_key},
+                {"name": "HF_TOKEN", "value": hf_token},
+            ],
         },
     }
 ]
