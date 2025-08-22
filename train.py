@@ -56,6 +56,9 @@ def main(args):
         learning_rate=2e-5,
         weight_decay=0.01,
         warmup_ratio=0.1,
+        report_to="wandb",  # Enable wandb integration
+        logging_steps=10,   # Log every 10 steps (adjust as needed)
+        logging_strategy="steps",
     )
 
     # 5. Instantiate the optimizer and scheduler
@@ -100,9 +103,8 @@ def main(args):
             
             model.router.set_expert_maturity(model.expert_manager.num_experts - 1, 1)
             
+            # Log custom metrics (loss and learning_rate are automatically logged by wandb integration)
             wandb.log({
-                "train_loss": trainer.state.log_history[-1]["loss"],
-                "learning_rate": trainer.state.log_history[-1]["learning_rate"],
                 "num_experts": model.expert_manager.num_experts,
             })
 

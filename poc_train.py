@@ -72,6 +72,9 @@ def main(args):
         logging_dir='./logs',
         save_safetensors=False,
         gradient_accumulation_steps=4,
+        report_to="wandb",  # Enable wandb integration
+        logging_steps=1,    # Log every step
+        logging_strategy="steps",
     )
 
     # 4. Instantiate the scheduler
@@ -128,10 +131,8 @@ def main(args):
             # Update the expert maturity
             model.router.set_expert_maturity(model.expert_manager.num_experts - 1, 1)
             
-            # Log metrics
+            # Log custom metrics (loss and learning_rate are automatically logged by wandb integration)
             wandb.log({
-                "train_loss": trainer.state.log_history[-1]["loss"],
-                "learning_rate": trainer.state.log_history[-1]["learning_rate"],
                 "num_experts": model.expert_manager.num_experts,
             })
 
