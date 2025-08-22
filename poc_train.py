@@ -75,6 +75,7 @@ def main(args):
         report_to="wandb",  # Enable wandb integration
         logging_steps=1,    # Log every step
         logging_strategy="steps",
+        max_steps=250,      # Limit training to 250 steps for POC
     )
 
     # 4. Instantiate the scheduler
