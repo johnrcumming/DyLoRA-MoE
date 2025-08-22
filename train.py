@@ -39,11 +39,12 @@ def main(args):
     tokenizer.pad_token = tokenizer.eos_token
     
     # Load larger, more diverse datasets
-    code_alpaca_dataset = load_dataset("the-stack-dedup/code-alpaca-v1", split="train")
+    from data.prepare_data import download_code_alpaca
+    code_alpaca_dataset = download_code_alpaca(filter_python=False)  # Use all languages
     mbpp_dataset = download_mbpp()
 
     # Use the full dataset for the data stream
-    data_stream = [[ex["content"] for ex in code_alpaca_dataset]]
+    data_stream = [[ex["output"] for ex in code_alpaca_dataset]]
 
     # 4. Configure the training arguments
     training_args = TrainingArguments(
