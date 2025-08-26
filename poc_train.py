@@ -31,7 +31,7 @@ def main(args):
     wandb.init(project="dylo-moe-software-development")
 
     # 2. Instantiate the model
-    model_name = "google/codegemma-2b"
+    model_name = "google/gemma-3-270m"
     hf_token = os.environ.get("HF_TOKEN")
     model = DyLoRA_MoE(model_name, num_experts=1, token=hf_token)
 
@@ -73,6 +73,7 @@ def main(args):
         logging_dir='./logs',
         save_safetensors=False,
         gradient_accumulation_steps=4,
+        gradient_checkpointing=True, # Enable gradient checkpointing
         report_to="wandb",  # Enable wandb integration
         logging_steps=1,    # Log every step
         logging_strategy="steps",
@@ -123,7 +124,14 @@ def main(args):
         
         # Check for novelty
         device = trainer.model.foundation_model.device
-        is_novel = model.add_new_skill(tokenized_data["input_ids"].to(device))
+        
+        # Check for novelty in batches
+        is_novel = False
+        batch_size = 1 # A smaller batch size for local testing
+        for i in range(0, len(tokenized_data["input_ids"]), batch_size):
+            batch = tokenized_data["input_ids"][i:i+batch_size]
+            if model.add_new_skill(batch.to(device)):
+                is_novel = True
         
         if True: # Forcing training for POC
             # Train on the new skill

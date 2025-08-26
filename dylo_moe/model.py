@@ -21,7 +21,13 @@ class DyLoRA_MoE(nn.Module):
         # Untie the weights of the lm_head
         if self.foundation_model.config.tie_word_embeddings:
             # Get the weights from the token embeddings
-            lm_head_weights = self.transformer.embed_tokens.weight
+            # Handle different embedding layer attribute names
+            if hasattr(self.transformer, 'wte'):
+                lm_head_weights = self.transformer.wte.weight
+            elif hasattr(self.transformer, 'embed_tokens'):
+                lm_head_weights = self.transformer.embed_tokens.weight
+            else:
+                raise AttributeError("Could not find word token embeddings in the transformer.")
             
             # Create a new lm_head with the same dimensions
             self.foundation_model.lm_head = nn.Linear(
@@ -33,13 +39,12 @@ class DyLoRA_MoE(nn.Module):
             # Copy the weights
             self.foundation_model.lm_head.weight = lm_head_weights
 
-        for param in self.foundation_model.parameters():
-            param.requires_grad = False
-        
-        # Unfreeze the lm_head for gradient computation
-        if hasattr(self.foundation_model, "lm_head"):
-            for param in self.foundation_model.lm_head.parameters():
-                param.requires_grad = True
+        # Do not freeze parameters until after at least one expert is attached
+        # LoRA adapters will mark only their params as trainable
+        # Freeze base model params but keep LoRA adapters and lm_head trainable
+        for name, param in self.foundation_model.named_parameters():
+            if "lora" not in name.lower() and "lm_head" not in name.lower():
+                param.requires_grad = False
 
         # 2. Initialize the Expert Manager
         self.expert_manager = ExpertManager(self.foundation_model, lora_r, lora_alpha, lora_dropout)
@@ -52,6 +57,10 @@ class DyLoRA_MoE(nn.Module):
 
         # 4. Initialize the Novelty Detector
         self.novelty_detector = NoveltyDetector()
+
+        # Ensure at least one default expert exists at init
+        default_expert_id = self.expert_manager.create_expert()
+        self.expert_manager.set_active_expert(default_expert_id)
 
     def _get_transformer(self):
         """
@@ -72,11 +81,6 @@ class DyLoRA_MoE(nn.Module):
         for attr in transformer_attrs:
             if hasattr(self.foundation_model, attr):
                 return getattr(self.foundation_model, attr)
-        
-        # If none of the common attributes are found, try to find it dynamically
-        for name, module in self.foundation_model.named_children():
-            if hasattr(module, 'embed_tokens'):
-                return module
         
         raise AttributeError(f"Could not find transformer component in {type(self.foundation_model).__name__}")
 
@@ -116,24 +120,24 @@ class DyLoRA_MoE(nn.Module):
         routing_weights = self.router(hidden_states)
 
         # Apply the experts based on the routing weights
-        # This is a simplified implementation. A more sophisticated implementation would
-        # involve applying the LoRA adapters in a more efficient manner.
-        
-        # Initialize a tensor to store the final hidden states
         final_hidden_states = torch.zeros_like(hidden_states)
-
-        # Loop through each expert and apply its transformation
+        
         for i in range(self.router.num_experts):
-            # Set the active expert
             self.expert_manager.set_active_expert(i)
-            
-            # Get the output from the transformer with the active expert
-            expert_output = self.transformer(input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states[-1]
-            
-            # Apply the routing weights
+            # Apply expert adapter on hidden states using foundation_model
+            expert_output = self.foundation_model(
+                inputs_embeds=hidden_states,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            ).hidden_states[-1]
             final_hidden_states += routing_weights[:, :, i].unsqueeze(-1) * expert_output
 
+        # Normalize the final hidden states to prevent numerical instability
+        final_hidden_states = final_hidden_states / (torch.sum(routing_weights, dim=-1, keepdim=True) + 1e-6)
+
         # Apply the lm_head to get the final logits
+        # Ensure logits computation uses correct dtype for stability
+        final_hidden_states = final_hidden_states.to(dtype=self.foundation_model.dtype)
         logits = self.foundation_model.lm_head(final_hidden_states)
 
         loss = None
@@ -154,6 +158,11 @@ class DyLoRA_MoE(nn.Module):
         )
 
         return (loss, outputs) if loss is not None else outputs
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """
+        Enables gradient checkpointing for the foundation model.
+        """
+        self.foundation_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
 
     def add_new_skill(self, skill_data: torch.Tensor, batch_size: int = 16):
         """

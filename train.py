@@ -55,6 +55,7 @@ def main(args):
         logging_dir='./logs_full',
         save_safetensors=True,
         gradient_accumulation_steps=8,
+        gradient_checkpointing=True, # Enable gradient checkpointing
         learning_rate=2e-5,
         weight_decay=0.01,
         warmup_ratio=0.1,
@@ -74,6 +75,8 @@ def main(args):
     
     # Scheduler will be managed by the Trainer based on TrainingArguments
 
+# Enable gradient checkpointing
+    model.gradient_checkpointing_enable()
     # 6. Instantiate the trainer
     trainer = Trainer(
         model=model,
@@ -97,7 +100,14 @@ def main(args):
         dataset = Dataset.from_dict(tokenized_data)
         
         device = trainer.model.foundation_model.device
-        is_novel = model.add_new_skill(tokenized_data["input_ids"].to(device))
+        
+        # Check for novelty in batches
+        is_novel = False
+        batch_size = 16 # A smaller batch size for local testing
+        for i in range(0, len(tokenized_data["input_ids"]), batch_size):
+            batch = tokenized_data["input_ids"][i:i+batch_size]
+            if model.add_new_skill(batch.to(device)):
+                is_novel = True
         
         if True: # Forcing training for now
             trainer.train_dataset = dataset
