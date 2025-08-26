@@ -1,22 +1,26 @@
 import torch
+from .skill_library import SkillLibrary
 
 class NoveltyDetector:
     """
-    Detects if a given input is novel and requires a new expert.
+    Detects if a given input is novel by comparing it to a library of known skills.
     """
-    def __init__(self, entropy_threshold: float = 0.5):
-        self.entropy_threshold = entropy_threshold
+    def __init__(self, skill_library: SkillLibrary, similarity_threshold: float = 0.85):
+        self.skill_library = skill_library
+        self.similarity_threshold = similarity_threshold
 
-    def is_novel(self, router_output: torch.Tensor) -> bool:
+    def is_novel(self, data_embedding: torch.Tensor) -> bool:
         """
-        Checks if the given data is novel by analyzing the entropy of the router's output.
-        A high entropy suggests that the router is uncertain, indicating a new skill.
+        Checks if the given data is novel by comparing its embedding to the skill library.
         """
-        # Calculate the entropy of the router's output distribution
-        entropy = -torch.sum(router_output * torch.log(router_output + 1e-9), dim=-1)
-        
-        # Normalize the entropy to be between 0 and 1
-        normalized_entropy = entropy / torch.log(torch.tensor(router_output.shape[-1]))
-        
-        # Check if the average entropy exceeds the threshold
-        return bool((torch.mean(normalized_entropy) > self.entropy_threshold).item())
+        skill_embeddings = self.skill_library.get_all_skills()
+
+        if skill_embeddings is None:
+            return True
+
+        # Calculate cosine similarity
+        cos = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
+        similarities = cos(data_embedding.unsqueeze(0), skill_embeddings)
+
+        # If the highest similarity is below the threshold, the skill is novel
+        return bool((torch.max(similarities) < self.similarity_threshold).item())

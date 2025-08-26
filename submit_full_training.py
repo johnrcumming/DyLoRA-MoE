@@ -41,7 +41,7 @@ worker_pool_specs = [
         "container_spec": {
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
             "command": ["python", "train.py"],
-            "args": [],
+            "args": ["--resume_from_checkpoint", "True"],
             "env": [
                 {"name": "WANDB_API_KEY", "value": wandb_api_key},
                 {"name": "HF_TOKEN", "value": hf_token},

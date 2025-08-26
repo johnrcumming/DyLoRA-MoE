@@ -8,6 +8,7 @@ __pycache__/
 # Hugging Face Trainer output
 results/
 logs/
+results_poc/
 
 # Weights & Biases
 wandb/

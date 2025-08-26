@@ -3,139 +3,132 @@ import os
 import argparse
 os.environ["WANDB_DISABLED"] = "false"
 import wandb
-from transformers import AutoTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling
-from datasets import Dataset, load_dataset
+import math
+from transformers import (
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+    DataCollatorForLanguageModeling,
+    EarlyStoppingCallback,
+)
+from datasets import Dataset, DatasetDict
+from transformers.tokenization_utils_base import BatchEncoding
+from typing import Union, Dict, Iterable, Any
+
 from dylo_moe.model import DyLoRA_MoE
 from dylo_moe.utils import print_trainable_parameters
-from dylo_moe.scheduler import TwoPhaseLRScheduler
 from data.prepare_data import download_mbpp
 
-def evaluate(model, tokenizer, dataset):
+def evaluate(model: torch.nn.Module, tokenizer: AutoTokenizer, dataset: Union[Dataset, DatasetDict]) -> float:
     """
     Evaluates the model on a given dataset.
     """
     model.eval()
-    total_loss = 0
-    device = model.foundation_model.device
+    total_loss: float = 0.0
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    examples: Iterable[Dict[str, Any]] = dataset if isinstance(dataset, Dataset) else dataset["train"]
     with torch.no_grad():
-        for example in dataset:
-            inputs = tokenizer(example["text"], return_tensors="pt", padding=True, truncation=True, max_length=2048)
+        size = 0
+        for example in examples:
+            if "text" not in example:
+                continue
+            size += 1
+            text = str(example["text"])
+            inputs = tokenizer(
+                text,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=2048
+            )  # type: ignore
             inputs = {k: v.to(device) for k, v in inputs.items()}
             inputs["labels"] = inputs["input_ids"]
-            loss, outputs = model(**inputs)
-            total_loss += loss.item()
-    return total_loss / len(dataset)
+            outputs = model(**inputs)
+            if isinstance(outputs, (tuple, list)):
+                loss = outputs[0]
+            elif hasattr(outputs, "loss"):
+                loss = outputs.loss
+            else:
+                continue
+            total_loss += float(loss.item())
+    return total_loss / max(1, size)
 
 def main(args):
     # 1. Initialize wandb
-    wandb.init(project="dylo-moe-software-development-full")
+    wandb.init(project="dylo-moe-full-training")
 
     # 2. Instantiate the model
     model_name = "google/codegemma-2b"
     hf_token = os.environ.get("HF_TOKEN")
-    model = DyLoRA_MoE(model_name, num_experts=4, token=hf_token) # Start with more experts
+    model = DyLoRA_MoE(
+        model_name,
+        num_experts=1,
+        token=hf_token,
+        lora_r=16,
+        lora_alpha=32,
+        lora_dropout=0.05
+    )
 
-    # 3. Create a data stream
+    # 3. Create tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
     
-    # Load larger, more diverse datasets
+    # 4. Load datasets
     from data.prepare_data import download_code_alpaca
-    code_alpaca_dataset = download_code_alpaca(filter_python=False)  # Use all languages
-    mbpp_dataset = download_mbpp()
+    code_alpaca_dataset = download_code_alpaca(filter_python=False, with_validation=True)
+    mbpp_dataset = download_mbpp(with_validation=True)
 
-    # Use the full dataset for the data stream
-    data_stream = [[ex["output"] for ex in code_alpaca_dataset]]
-
-    # 4. Configure the training arguments
+    # 5. Configure the training arguments
     training_args = TrainingArguments(
         output_dir="./results_full",
-        num_train_epochs=args.num_epochs, # More epochs for full training
-        per_device_train_batch_size=4, # Larger batch size
-        logging_dir='./logs_full',
-        save_safetensors=True,
-        gradient_accumulation_steps=8,
-        gradient_checkpointing=True, # Enable gradient checkpointing
+        num_train_epochs=args.num_epochs,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=8,  # Effective batch size = 32
+        gradient_checkpointing=True,
         learning_rate=2e-5,
         weight_decay=0.01,
         warmup_ratio=0.1,
-        report_to="wandb",  # Enable wandb integration
-        logging_steps=10,   # Log every 10 steps (adjust as needed)
+        lr_scheduler_type="cosine",
+        fp16=args.fp16,
+        bf16=args.bf16,
+        logging_dir='./logs_full',
+        logging_steps=50,
         logging_strategy="steps",
+        evaluate_during_training=True,
+        save_total_limit=2,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        report_to="wandb",
     )
 
-    # 5. Instantiate the optimizer and scheduler
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": model.foundation_model.parameters()},
-            {"params": model.router.parameters(), "lr": 5e-4},
-        ],
-        lr=training_args.learning_rate
-    )
-    
-    # Scheduler will be managed by the Trainer based on TrainingArguments
-
-# Enable gradient checkpointing
-    model.gradient_checkpointing_enable()
     # 6. Instantiate the trainer
     trainer = Trainer(
         model=model,
         args=training_args,
+        train_dataset=code_alpaca_dataset["train"],
+        eval_dataset=code_alpaca_dataset["validation"],
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
-        optimizers=(optimizer, None), # Let Trainer handle the scheduler
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
-    # 7. Initial Evaluation
-    print("\n--- Initial Evaluation ---")
-    initial_loss = evaluate(model, tokenizer, mbpp_dataset)
-    print(f"Initial MBPP Loss: {initial_loss}")
-    wandb.log({"initial_mbpp_loss": initial_loss})
+    # 7. Train the model
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
-    # 8. Continual learning loop
-    for i, skill_data in enumerate(data_stream):
-        print(f"\n--- Processing Skill {i+1} ---")
-        
-        tokenized_data = tokenizer(skill_data, padding=True, truncation=True, return_tensors="pt", max_length=2048)
-        tokenized_data["labels"] = tokenized_data["input_ids"]
-        dataset = Dataset.from_dict(tokenized_data)
-        
-        device = trainer.model.foundation_model.device
-        
-        # Check for novelty in batches
-        is_novel = False
-        batch_size = 16 # A smaller batch size for local testing
-        for i in range(0, len(tokenized_data["input_ids"]), batch_size):
-            batch = tokenized_data["input_ids"][i:i+batch_size]
-            if model.add_new_skill(batch.to(device)):
-                is_novel = True
-        
-        if True: # Forcing training for now
-            trainer.train_dataset = dataset
-            trainer.train()
-            
-            model.router.set_expert_maturity(model.expert_manager.num_experts - 1, 1)
-            
-            # Log custom metrics (loss and learning_rate are automatically logged by wandb integration)
-            wandb.log({
-                "num_experts": model.expert_manager.num_experts,
-            })
+    # 8. Final Evaluation on MBPP test set
+    print("\n--- Final Evaluation on MBPP ---")
+    final_metrics = trainer.evaluate(mbpp_dataset["test"])
+    print(f"Final MBPP Test Loss: {final_metrics['eval_loss']}")
+    wandb.log({"final_mbpp_test_loss": final_metrics["eval_loss"]})
 
-    # 9. Final Evaluation
-    print("\n--- Final Evaluation ---")
-    final_loss = evaluate(model, tokenizer, mbpp_dataset)
-    print(f"Final MBPP Loss: {final_loss}")
-    wandb.log({"final_mbpp_loss": final_loss})
+    # 9. Save the best model
+    print("\n--- Saving Best Model ---")
+    trainer.save_model("./results_full/best_model")
+    tokenizer.save_pretrained("./results_full/best_model")
+    print("Best model saved to ./results_full/best_model")
 
-    # 10. Save and upload the trained LoRA weights
-    print("\n--- Saving and Uploading LoRA Weights ---")
-    weights_path = "./results_full/dylo_moe_weights.pt"
-    torch.save(model.state_dict(), weights_path)
-    artifact = wandb.Artifact('dylo-moe-weights', type='model')
-    artifact.add_file(weights_path)
-    wandb.log_artifact(artifact)
-    print("LoRA weights saved and uploaded to wandb.")
-
-    # 11. Print the final model architecture and trainable parameters
+    # 10. Print the final model architecture and trainable parameters
     print("\n--- Final Model Architecture ---")
     print(model)
     print("\n--- Trainable Parameters ---")
@@ -146,5 +139,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs.")
+    parser.add_argument("--fp16", action="store_true", help="Enable FP16 mixed precision.")
+    parser.add_argument("--bf16", action="store_true", help="Enable BF16 mixed precision.")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint to resume training from.")
     args = parser.parse_args()
     main(args)

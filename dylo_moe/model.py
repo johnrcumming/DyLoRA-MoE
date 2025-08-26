@@ -4,28 +4,31 @@ from transformers import AutoModelForCausalLM
 from .router import DynamicHybridRouter
 from .expert import ExpertManager
 from .novelty_detector import NoveltyDetector
+from .skill_library import SkillLibrary
 
 class DyLoRA_MoE(nn.Module):
     """
     Implements the Dynamic LoRA-based Mixture-of-Experts (DyLoRA-MoE) architecture.
     """
-    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 8, lora_alpha: int = 16, lora_dropout: float = 0.1, token: str | None = None):
+    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05, token: str | None = None):
         super(DyLoRA_MoE, self).__init__()
 
         # 1. Load and freeze the foundation model
-        self.foundation_model = AutoModelForCausalLM.from_pretrained(model_name, token=token)
-        
-        # Get the transformer component
-        self.transformer = self._get_transformer()
+        self.foundation_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            token=token,
+            attn_implementation="eager"
+        )
         
         # Untie the weights of the lm_head
         if self.foundation_model.config.tie_word_embeddings:
+            transformer = self._get_transformer()
             # Get the weights from the token embeddings
             # Handle different embedding layer attribute names
-            if hasattr(self.transformer, 'wte'):
-                lm_head_weights = self.transformer.wte.weight
-            elif hasattr(self.transformer, 'embed_tokens'):
-                lm_head_weights = self.transformer.embed_tokens.weight
+            if hasattr(transformer, 'wte'):
+                lm_head_weights = transformer.wte.weight
+            elif hasattr(transformer, 'embed_tokens'):
+                lm_head_weights = transformer.embed_tokens.weight
             else:
                 raise AttributeError("Could not find word token embeddings in the transformer.")
             
@@ -37,17 +40,26 @@ class DyLoRA_MoE(nn.Module):
             )
             
             # Copy the weights
-            self.foundation_model.lm_head.weight = lm_head_weights
+            self.foundation_model.lm_head.weight = nn.Parameter(lm_head_weights.clone())
 
-        # Do not freeze parameters until after at least one expert is attached
-        # LoRA adapters will mark only their params as trainable
-        # Freeze base model params but keep LoRA adapters and lm_head trainable
+        self._log_trainable_parameters("After initializing lm_head")
+        
+        # 2. Initialize the Expert Manager
+        self.expert_manager = ExpertManager(self.foundation_model, lora_r, lora_alpha, lora_dropout)
+
+        # Ensure at least one default expert exists at init
+        default_expert_id = self.expert_manager.create_expert()
+        self.expert_manager.set_active_expert(default_expert_id)
+        
+        # Sync foundation_model reference with expert_manager.model (which may now be a PeftModel)
+        self.foundation_model = self.expert_manager.model
+
+        # Freeze base model params after LoRA adapters are attached, keep lm_head trainable
         for name, param in self.foundation_model.named_parameters():
             if "lora" not in name.lower() and "lm_head" not in name.lower():
                 param.requires_grad = False
 
-        # 2. Initialize the Expert Manager
-        self.expert_manager = ExpertManager(self.foundation_model, lora_r, lora_alpha, lora_dropout)
+        self._log_trainable_parameters("After attaching first LoRA expert and freezing base model")
 
         # 3. Initialize the Dynamic Hybrid Router
         self.router = DynamicHybridRouter(
@@ -55,12 +67,35 @@ class DyLoRA_MoE(nn.Module):
             num_experts=num_experts
         )
 
-        # 4. Initialize the Novelty Detector
-        self.novelty_detector = NoveltyDetector()
+        # 4. Initialize the Skill Library
+        self.skill_library = SkillLibrary(embedding_size=self.foundation_model.config.hidden_size)
 
-        # Ensure at least one default expert exists at init
-        default_expert_id = self.expert_manager.create_expert()
-        self.expert_manager.set_active_expert(default_expert_id)
+        # 5. Initialize the Novelty Detector
+        self.novelty_detector = NoveltyDetector(self.skill_library)
+        
+        # Move router to the same device as the foundation model
+        self.router.to(self.foundation_model.device)
+        
+
+    def _log_trainable_parameters(self, prefix: str = ""):
+        try:
+            parameters = list(self.foundation_model.parameters())
+            num_params = sum(p.numel() for p in parameters)
+            num_trainable = sum(p.numel() for p in parameters if p.requires_grad)
+
+            # Use logging instead of print for better maintainability
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(
+                "%s: Model parameters - Total: %s | Trainable: %s (%.2f%%)",
+                prefix,
+                f"{num_params:,}",
+                f"{num_trainable:,}",
+                (num_trainable / num_params * 100) if num_params > 0 else 0.0,
+            )
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Could not log model parameters: {e}", RuntimeWarning)
 
     def _get_transformer(self):
         """
@@ -109,7 +144,8 @@ class DyLoRA_MoE(nn.Module):
         Forward pass of the DyLoRA-MoE model.
         """
         # Get the transformer outputs without the language modeling head
-        transformer_outputs = self.transformer(
+        transformer = self._get_transformer()
+        transformer_outputs = transformer(
             input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
@@ -158,7 +194,9 @@ class DyLoRA_MoE(nn.Module):
         )
 
         return (loss, outputs) if loss is not None else outputs
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+    from typing import Optional, Dict, Any
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs: Optional[Dict[str, Any]] = None) -> None:
         """
         Enables gradient checkpointing for the foundation model.
         """
@@ -179,13 +217,19 @@ class DyLoRA_MoE(nn.Module):
             
             hidden_states = torch.cat(all_hidden_states, dim=0)
             router_output = self.router(hidden_states)
+            
+            # Get the embedding for the new skill
+            skill_embedding = torch.mean(hidden_states, dim=1)
 
-        is_novel = self.novelty_detector.is_novel(router_output)
+        is_novel = self.novelty_detector.is_novel(skill_embedding)
         if is_novel:
             # 2. Create a new expert
             new_expert_id = self.expert_manager.create_expert()
-            self.router.add_expert()
+            self.router.add_expert(device=self.foundation_model.device)
             self.expert_manager.set_active_expert(new_expert_id)
+            
+            # Add the new skill to the library
+            self.skill_library.add_skill(new_expert_id, torch.mean(skill_embedding, dim=0))
 
             # 3. Train the new expert (this will be a separate training loop)
             print(f"New skill detected. Created expert {new_expert_id}.")
