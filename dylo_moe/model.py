@@ -143,38 +143,50 @@ class DyLoRA_MoE(nn.Module):
         """
         Forward pass of the DyLoRA-MoE model.
         """
-        # Get the transformer outputs without the language modeling head
-        transformer = self._get_transformer()
-        transformer_outputs = transformer(
-            input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-        )
-        hidden_states = transformer_outputs.hidden_states[-1]
-
-        # Route the input to the appropriate expert(s)
-        routing_weights = self.router(hidden_states)
-
-        # Apply the experts based on the routing weights
-        final_hidden_states = torch.zeros_like(hidden_states)
-        
-        for i in range(self.router.num_experts):
-            self.expert_manager.set_active_expert(i)
-            # Apply expert adapter on hidden states using foundation_model
-            expert_output = self.foundation_model(
-                inputs_embeds=hidden_states,
+        # For single expert case, use direct approach for efficiency
+        if self.expert_manager.num_experts == 1:
+            outputs = self.foundation_model(
+                input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
-            ).hidden_states[-1]
-            final_hidden_states += routing_weights[:, :, i].unsqueeze(-1) * expert_output
-
-        # Normalize the final hidden states to prevent numerical instability
-        final_hidden_states = final_hidden_states / (torch.sum(routing_weights, dim=-1, keepdim=True) + 1e-6)
-
-        # Apply the lm_head to get the final logits
-        # Ensure logits computation uses correct dtype for stability
-        final_hidden_states = final_hidden_states.to(dtype=self.foundation_model.dtype)
-        logits = self.foundation_model.lm_head(final_hidden_states)
+            )
+            logits = outputs.logits
+        else:
+            # Multi-expert routing approach
+            # Get transformer outputs for routing decisions
+            transformer = self._get_transformer()
+            transformer_outputs = transformer(
+                input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+            hidden_states = transformer_outputs.hidden_states[-1]
+            
+            # Route the input to the appropriate expert(s)
+            routing_weights = self.router(hidden_states)
+            
+            # Apply experts and combine outputs
+            expert_logits = []
+            for i in range(self.router.num_experts):
+                self.expert_manager.set_active_expert(i)
+                expert_output = self.foundation_model(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=False,
+                )
+                expert_logits.append(expert_output.logits)
+            
+            # Combine expert outputs using routing weights
+            # Average routing weights across sequence length for logit combination
+            expert_weights = routing_weights.mean(dim=1)  # [batch_size, num_experts]
+            
+            logits = torch.zeros_like(expert_logits[0])
+            for i, expert_logit in enumerate(expert_logits):
+                logits += expert_weights[:, i:i+1, None] * expert_logit
+            
+            # Use the last expert's outputs for other attributes
+            outputs = expert_output
+            outputs.logits = logits
 
         loss = None
         if labels is not None:
@@ -185,15 +197,15 @@ class DyLoRA_MoE(nn.Module):
 
         # Create a custom output object
         from transformers.modeling_outputs import CausalLMOutputWithPast
-        outputs = CausalLMOutputWithPast(
+        output = CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            past_key_values=transformer_outputs.past_key_values,
-            hidden_states=(*transformer_outputs.hidden_states[:-1], final_hidden_states),
-            attentions=transformer_outputs.attentions,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )
 
-        return (loss, outputs) if loss is not None else outputs
+        return (loss, output) if loss is not None else output
     from typing import Optional, Dict, Any
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs: Optional[Dict[str, Any]] = None) -> None:
