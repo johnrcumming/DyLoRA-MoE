@@ -13,9 +13,14 @@ class ExpertManager:
         self.num_experts = 0
         self.expert_configs: dict[int, LoraConfig] = {}
 
-    def create_expert(self) -> int:
-        """
-        Creates a new LoRA expert and adds it to the model.
+    def create_expert(self, r: int | None = None, lora_alpha: int | None = None, lora_dropout: float | None = None) -> int:
+        """Create a new LoRA expert with optional overrides.
+
+        Parameters
+        ----------
+        r: optional rank override
+        lora_alpha: optional alpha override
+        lora_dropout: optional dropout override
         """
         expert_id = self.num_experts
         
@@ -31,9 +36,9 @@ class ExpertManager:
             found = False
             try:
                 module_names: list[str] = []
-                for n, _ in self.model.named_modules():
+                for n, _ in self.model.named_modules():  # type: ignore[attr-defined]
                     try:
-                        module_names.append(str(n))
+                        module_names.append(str(n))  # type: ignore[arg-type]
                     except Exception:
                         continue
                 for name in module_names:
@@ -51,15 +56,16 @@ class ExpertManager:
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
-            r=self.lora_r,
-            lora_alpha=self.lora_alpha,
-            lora_dropout=self.lora_dropout,
+            r=r if r is not None else self.lora_r,
+            lora_alpha=lora_alpha if lora_alpha is not None else self.lora_alpha,
+            lora_dropout=lora_dropout if lora_dropout is not None else self.lora_dropout,
             target_modules=chosen_targets
         )
 
         # The peft library directly modifies the model in place
         if not isinstance(self.model, PeftModel):
-            self.model = get_peft_model(self.model, peft_config, adapter_name=f"expert_{expert_id}")
+            # Peft returns a PeftModel subtype; ignore type narrowing complaints
+            self.model = get_peft_model(self.model, peft_config, adapter_name=f"expert_{expert_id}")  # type: ignore[assignment]
         else:
             self.model.add_adapter(f"expert_{expert_id}", peft_config)
 

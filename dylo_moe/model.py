@@ -11,69 +11,58 @@ class DyLoRA_MoE(nn.Module):
     Implements the Dynamic LoRA-based Mixture-of-Experts (DyLoRA-MoE) architecture.
     """
     def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05, token: str | None = None):
-        super(DyLoRA_MoE, self).__init__()
+        super().__init__()
 
-        # 1. Load and freeze the foundation model
+        # 1. Load base model
         self.foundation_model = AutoModelForCausalLM.from_pretrained(
             model_name,
             token=token,
-            attn_implementation="eager"
+            attn_implementation="eager",
         )
-        
-        # Untie the weights of the lm_head
-        if self.foundation_model.config.tie_word_embeddings:
+        # Disable caching to avoid DynamicCache objects in evaluation padding
+        if hasattr(self.foundation_model.config, 'use_cache'):
+            self.foundation_model.config.use_cache = False
+
+        # 2. Untie lm_head if tied
+        if getattr(self.foundation_model.config, "tie_word_embeddings", False):
             transformer = self._get_transformer()
-            # Get the weights from the token embeddings
-            # Handle different embedding layer attribute names
-            if hasattr(transformer, 'wte'):
+            if hasattr(transformer, "wte"):
                 lm_head_weights = transformer.wte.weight
-            elif hasattr(transformer, 'embed_tokens'):
+            elif hasattr(transformer, "embed_tokens"):
                 lm_head_weights = transformer.embed_tokens.weight
             else:
-                raise AttributeError("Could not find word token embeddings in the transformer.")
-            
-            # Create a new lm_head with the same dimensions
+                raise AttributeError("Could not find word token embeddings in transformer for untie.")
             self.foundation_model.lm_head = nn.Linear(
                 self.foundation_model.config.hidden_size,
                 self.foundation_model.config.vocab_size,
-                bias=False
+                bias=False,
             )
-            
-            # Copy the weights
             self.foundation_model.lm_head.weight = nn.Parameter(lm_head_weights.clone())
-
         self._log_trainable_parameters("After initializing lm_head")
-        
-        # 2. Initialize the Expert Manager
-        self.expert_manager = ExpertManager(self.foundation_model, lora_r, lora_alpha, lora_dropout)
 
-        # Ensure at least one default expert exists at init
-        default_expert_id = self.expert_manager.create_expert()
-        self.expert_manager.set_active_expert(default_expert_id)
-        
-        # Sync foundation_model reference with expert_manager.model (which may now be a PeftModel)
+        # 3. Expert manager + first expert
+        self.expert_manager = ExpertManager(self.foundation_model, lora_r, lora_alpha, lora_dropout)
+        first_expert_id = self.expert_manager.create_expert()
+        self.expert_manager.set_active_expert(first_expert_id)
         self.foundation_model = self.expert_manager.model
 
-        # Freeze base model params after LoRA adapters are attached, keep lm_head trainable
+        # 4. Freeze non-LoRA params except lm_head
         for name, param in self.foundation_model.named_parameters():
             if "lora" not in name.lower() and "lm_head" not in name.lower():
                 param.requires_grad = False
+        self._log_trainable_parameters("After attaching first expert & freezing base")
 
-        self._log_trainable_parameters("After attaching first LoRA expert and freezing base model")
+        # 5. Router
+        hidden_size = int(getattr(self.foundation_model.config, "hidden_size"))  # type: ignore[arg-type]
+        self.router = DynamicHybridRouter(input_size=hidden_size, num_experts=num_experts)
+        if self.router.expert_maturity.numel() > 0:
+            self.router.expert_maturity[0] = 1
 
-        # 3. Initialize the Dynamic Hybrid Router
-        self.router = DynamicHybridRouter(
-            input_size=self.foundation_model.config.hidden_size,
-            num_experts=num_experts
-        )
-
-        # 4. Initialize the Skill Library
-        self.skill_library = SkillLibrary(embedding_size=self.foundation_model.config.hidden_size)
-
-        # 5. Initialize the Novelty Detector
+        # 6. Skill library & novelty detector
+        self.skill_library = SkillLibrary(embedding_size=hidden_size)
         self.novelty_detector = NoveltyDetector(self.skill_library)
-        
-        # Move router to the same device as the foundation model
+
+        # 7. Device alignment
         self.router.to(self.foundation_model.device)
         
 
@@ -149,6 +138,7 @@ class DyLoRA_MoE(nn.Module):
                 input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
+                use_cache=False,
             )
             logits = outputs.logits
         else:
@@ -173,6 +163,7 @@ class DyLoRA_MoE(nn.Module):
                     input_ids,
                     attention_mask=attention_mask,
                     output_hidden_states=False,
+                    use_cache=False,
                 )
                 expert_logits.append(expert_output.logits)
             
@@ -194,18 +185,15 @@ class DyLoRA_MoE(nn.Module):
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = torch.nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-
-        # Create a custom output object
         from transformers.modeling_outputs import CausalLMOutputWithPast
-        output = CausalLMOutputWithPast(
+        return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            past_key_values=outputs.past_key_values,
+            past_key_values=None,  # strip caches to prevent accelerator padding issues
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
 
-        return (loss, output) if loss is not None else output
     from typing import Optional, Dict, Any
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs: Optional[Dict[str, Any]] = None) -> None:
@@ -214,7 +202,7 @@ class DyLoRA_MoE(nn.Module):
         """
         self.foundation_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
 
-    def add_new_skill(self, skill_data: torch.Tensor, batch_size: int = 16):
+    def add_new_skill(self, skill_data: torch.Tensor, batch_size: int = 16, warmup_steps: int = 50):
         """
         Adds a new skill to the model.
         """
@@ -228,15 +216,22 @@ class DyLoRA_MoE(nn.Module):
                 all_hidden_states.append(outputs.hidden_states[-1])
             
             hidden_states = torch.cat(all_hidden_states, dim=0)
-            router_output = self.router(hidden_states)
-            
-            # Get the embedding for the new skill
-            skill_embedding = torch.mean(hidden_states, dim=1)
+            _ = self.router(hidden_states)  # force same path, discard
+            # Improved embedding: token mean after RMSNorm (if available) else LayerNorm fallback
+            if hasattr(self.foundation_model, 'model') and hasattr(self.foundation_model.model, 'norm'):
+                norm_layer = self.foundation_model.model.norm  # type: ignore[attr-defined]
+                normed = norm_layer(hidden_states)
+            else:
+                norm_layer = torch.nn.LayerNorm(hidden_states.size(-1), eps=1e-6)
+                normed = norm_layer(hidden_states)
+            skill_embedding = normed.mean(dim=1)  # [batch, hidden]
 
         is_novel = self.novelty_detector.is_novel(skill_embedding)
         if is_novel:
             # 2. Create a new expert
-            new_expert_id = self.expert_manager.create_expert()
+            # Increase adapter capacity slightly for later experts
+            dynamic_r = self.expert_manager.lora_r if self.expert_manager.num_experts == 0 else min(self.expert_manager.lora_r * 2, 32)
+            new_expert_id = self.expert_manager.create_expert(r=dynamic_r)
             self.router.add_expert(device=self.foundation_model.device)
             self.expert_manager.set_active_expert(new_expert_id)
             
@@ -244,6 +239,10 @@ class DyLoRA_MoE(nn.Module):
             self.skill_library.add_skill(new_expert_id, torch.mean(skill_embedding, dim=0))
 
             # 3. Train the new expert (this will be a separate training loop)
-            print(f"New skill detected. Created expert {new_expert_id}.")
+            print(f"New skill detected. Created expert {new_expert_id} (r={dynamic_r}).")
+            # Newly added expert remains immature (0) until explicitly matured post-training
+            # Ensure mature status of prior experts
+            if new_expert_id > 0:
+                self.router.set_expert_maturity(new_expert_id - 1, 1)
         
         return is_novel

@@ -11,7 +11,8 @@ from transformers import (
     DataCollatorForLanguageModeling,
     EarlyStoppingCallback,
 )
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets
+import time
 from dylo_moe.model import DyLoRA_MoE
 from dylo_moe.utils import print_trainable_parameters
 from data.prepare_data import download_mbpp
@@ -32,12 +33,35 @@ def preprocess_evaluation_dataset(tokenizer, dataset):
     tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset.column_names)
     return tokenized_dataset
 
-def preprocess_training_dataset(tokenizer, skill_data):
-    """
-    Tokenizes the training dataset.
-    """
-    tokenized_data = tokenizer(skill_data, padding=True, truncation=True, return_tensors="pt", max_length=512)
-    dataset = Dataset.from_dict({"input_ids": tokenized_data.input_ids, "attention_mask": tokenized_data.attention_mask, "labels": tokenized_data.input_ids})
+def pack_sequences(tokenizer, texts, max_length=512):
+    """Naive sequence packing: concatenate tokenized sequences until max_length reached."""
+    input_ids_batches = []
+    attn_batches = []
+    cur = []
+    for t in texts:
+        ids = tokenizer(t, add_special_tokens=False)["input_ids"]
+        if len(ids) > max_length:
+            ids = ids[:max_length]
+        if len(cur) + len(ids) > max_length:
+            if cur:
+                pad_len = max_length - len(cur)
+                input_ids_batches.append(cur + [tokenizer.pad_token_id] * pad_len)
+                attn_batches.append([1] * len(cur) + [0] * pad_len)
+            cur = []
+        cur.extend(ids)
+    if cur:
+        pad_len = max_length - len(cur)
+        input_ids_batches.append(cur + [tokenizer.pad_token_id] * pad_len)
+        attn_batches.append([1] * len(cur) + [0] * pad_len)
+    return input_ids_batches, attn_batches
+
+def preprocess_training_dataset(tokenizer, skill_data, pack=True):
+    if pack:
+        input_ids, attn = pack_sequences(tokenizer, skill_data)
+        dataset = Dataset.from_dict({"input_ids": input_ids, "attention_mask": attn, "labels": input_ids})
+    else:
+        tokenized_data = tokenizer(skill_data, padding=True, truncation=True, return_tensors="pt", max_length=512)
+        dataset = Dataset.from_dict({"input_ids": tokenized_data.input_ids, "attention_mask": tokenized_data.attention_mask, "labels": tokenized_data.input_ids})
     return dataset
 
 def main(args):
@@ -84,9 +108,9 @@ def main(args):
     training_args = TrainingArguments(
         output_dir="./results_poc",
         num_train_epochs=args.num_epochs,  # Reduced from 10
-        per_device_train_batch_size=2,  # Increased from 1
-        per_device_eval_batch_size=2,
-        gradient_accumulation_steps=2,  # Reduced from 4
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=4,
         gradient_checkpointing=True,
         learning_rate=1e-4,
         lr_scheduler_type="cosine",
@@ -109,11 +133,25 @@ def main(args):
     )
 
     # 5. Instantiate the trainer
+    python_eval = preprocess_evaluation_dataset(tokenizer, python_dataset["test"])
+    mbpp_eval = preprocess_evaluation_dataset(tokenizer, mbpp_dataset["validation"])
+    combined_eval = concatenate_datasets([
+        python_eval.add_column("eval_domain", [0]*len(python_eval)),
+        mbpp_eval.add_column("eval_domain", [1]*len(mbpp_eval))
+    ])
+
+    # Custom compute_metrics to split domains (0=python,1=mbpp)
+    def compute_metrics(eval_pred):
+        # eval_pred doesn't contain domain labels, so recompute loss per subset via trainer.evaluate subsets
+        # We'll perform manual evaluation below instead; returning empty dict here.
+        return {}
+
     trainer = Trainer(
         model=model,
         args=training_args,
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
-        eval_dataset=preprocess_evaluation_dataset(tokenizer, python_dataset["test"]),
+        eval_dataset=combined_eval,
+        compute_metrics=compute_metrics,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=5)],
     )
 
@@ -125,10 +163,19 @@ def main(args):
     wandb.log({"initial_mbpp_validation_loss": initial_metrics['eval_loss']})
 
     # 7. Continual learning loop
+    last_log_time = time.time()
+    tokens_processed = 0
     for i, skill_data in enumerate(data_stream):
         print(f"\n--- Processing Skill {i+1} ---")
         
-        dataset = preprocess_training_dataset(tokenizer, skill_data)
+        dataset = preprocess_training_dataset(tokenizer, skill_data, pack=True)
+        # Log padding fraction estimate
+        pad_tokens = 0
+        total_tokens = 0
+        for row in dataset["input_ids"]:
+            pad_tokens += sum(1 for x in row if x == tokenizer.pad_token_id)
+            total_tokens += len(row)
+        wandb.log({"padding_fraction": pad_tokens/total_tokens if total_tokens else 0})
         
         device = trainer.args.device
         
@@ -138,15 +185,45 @@ def main(args):
             batch = dataset[j:j+batch_size]["input_ids"]
             if model.add_new_skill(torch.tensor(batch).to(device)):
                 is_novel = True
-        
+
         if is_novel:
-            print(f"Novel skill detected. Training new expert...")
+            print("Novel skill detected. Training new expert...")
             trainer.train_dataset = dataset
             trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
             model.router.set_expert_maturity(model.expert_manager.num_experts - 1, 1)
             wandb.log({"num_experts": model.expert_manager.num_experts})
         else:
             print("Skill not novel. Skipping training.")
+
+        # Log routing metrics if multiple experts
+        if model.router.num_experts > 1:
+            sample = torch.tensor(dataset[0:1]["input_ids"])
+            with torch.no_grad():
+                outputs = model.foundation_model(sample, attention_mask=(sample != tokenizer.pad_token_id), output_hidden_states=True)
+                hidden_states = outputs.hidden_states[-1]
+                routing_weights = model.router(hidden_states)
+                entropy = -(routing_weights * (routing_weights.clamp(min=1e-8).log())).sum(-1).mean().item()
+                expert_usage = routing_weights.mean(dim=(0,1)).cpu().tolist()
+            wandb.log({
+                "routing_entropy": entropy,
+                **{f"expert_usage_{idx}": val for idx, val in enumerate(expert_usage)}
+            })
+
+        # Tokens/sec logging (approx): count non-pad tokens ingested
+        for row in dataset["attention_mask"]:
+            tokens_processed += sum(row)
+        now = time.time()
+        if now - last_log_time >= 30:
+            tps = tokens_processed / (now - last_log_time)
+            wandb.log({"tokens_per_second": tps})
+            tokens_processed = 0
+            last_log_time = now
+
+        # Evaluate per-domain losses (python vs mbpp) occasionally
+        if (i + 1) % 1 == 0:  # every skill
+            python_loss = trainer.evaluate(python_eval, metric_key_prefix="eval_python")["eval_python_loss"]
+            mbpp_loss = trainer.evaluate(mbpp_eval, metric_key_prefix="eval_mbpp")["eval_mbpp_loss"]
+            wandb.log({"eval_python_loss": python_loss, "eval_mbpp_loss": mbpp_loss})
 
     # 8. Final Evaluation
     print("\n--- Final Evaluation ---")
