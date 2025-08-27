@@ -83,10 +83,10 @@ def main(args):
     # 4. Configure training arguments
     training_args = TrainingArguments(
         output_dir="./results_poc",
-        num_train_epochs=args.num_epochs,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        gradient_accumulation_steps=4,
+        num_train_epochs=args.num_epochs,  # Reduced from 10
+        per_device_train_batch_size=2,  # Increased from 1
+        per_device_eval_batch_size=2,
+        gradient_accumulation_steps=2,  # Reduced from 4
         gradient_checkpointing=True,
         learning_rate=1e-4,
         lr_scheduler_type="cosine",
@@ -105,7 +105,6 @@ def main(args):
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="wandb",
-        max_steps=250,
         remove_unused_columns=False,
     )
 
@@ -172,7 +171,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
+    parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs.")
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 mixed precision.")
     parser.add_argument("--bf16", action="store_true", help="Enable BF16 mixed precision.")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint to resume training from.")
