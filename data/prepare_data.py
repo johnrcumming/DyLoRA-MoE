@@ -20,7 +20,11 @@ def download_code_alpaca(filter_python=False, with_validation=True):
         dataset = dataset.filter(lambda example: "python" in example["instruction"].lower())
 
     if with_validation:
-        dataset = dataset.train_test_split(test_size=0.1, seed=42)
+        split_dataset = dataset.train_test_split(test_size=0.1, seed=42)
+        dataset = DatasetDict({
+            'train': split_dataset['train'],
+            'validation': split_dataset['test']
+        })
     return dataset
 
 
