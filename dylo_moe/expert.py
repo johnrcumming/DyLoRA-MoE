@@ -1,57 +1,63 @@
 from transformers import PreTrainedModel
-from peft import get_peft_model, LoraConfig, TaskType, PeftModel
+from peft import get_peft_model, LoraConfig, TaskType, PeftModel, PeftMixedModel
+from peft.tuners.lora import LoraLayer
+import torch.nn as nn
+from typing import Set, List, Union
 
 class ExpertManager:
     """
-    Manages the creation and application of LoRA experts.
+    Manages the creation and application of LoRA experts, including offloading
+    inactive experts to CPU memory to conserve GPU VRAM.
     """
     def __init__(self, model: PreTrainedModel, lora_r: int, lora_alpha: int, lora_dropout: float):
-        self.model = model
+        self.model: Union[PreTrainedModel, PeftModel, PeftMixedModel] = model
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
         self.num_experts = 0
         self.expert_configs: dict[int, LoraConfig] = {}
+        self.current_expert_id: int | None = None
+
+    def _get_adapter_modules(self, expert_id: int) -> List[nn.Module]:
+        """Helper to get all nn.Module layers for a specific adapter."""
+        adapter_name = f"expert_{expert_id}"
+        adapter_modules: List[nn.Module] = []
+
+        if not isinstance(self.model, (PeftModel, PeftMixedModel)):
+            return adapter_modules
+
+        for module in self.model.modules():
+            if isinstance(module, LoraLayer):
+                if adapter_name in module.lora_A:
+                    adapter_modules.append(module.lora_A[adapter_name])
+                if adapter_name in module.lora_B:
+                    adapter_modules.append(module.lora_B[adapter_name])
+        return adapter_modules
 
     def create_expert(self, r: int | None = None, lora_alpha: int | None = None, lora_dropout: float | None = None) -> int:
-        """Create a new LoRA expert with optional overrides.
-
-        Parameters
-        ----------
-        r: optional rank override
-        lora_alpha: optional alpha override
-        lora_dropout: optional dropout override
-        """
+        """Create a new LoRA expert and immediately offload it to the CPU."""
         expert_id = self.num_experts
-        
-        # Dynamically choose target modules based on model architecture
-        common_targets = [
-            ["q_proj", "v_proj"],                          # LLaMA/Mistral
-            ["query_key_value"],                           # Falcon-style
-            ["c_attn"],                                    # GPT-2 style
-            ["query", "key", "value"],                     # BERT/RoBERTa
+        adapter_name = f"expert_{expert_id}"
+
+        # Find target modules dynamically
+        target_modules: List[str]
+        possible_target_modules = [
+            "q_proj", "v_proj", "k_proj", "o_proj",
+            "query_key_value", "c_attn", "Wqkv",
         ]
-        chosen_targets = None
-        for candidate in common_targets:
-            found = False
-            try:
-                module_names: list[str] = []
-                for n, _ in self.model.named_modules():  # type: ignore[attr-defined]
-                    try:
-                        module_names.append(str(n))  # type: ignore[arg-type]
-                    except Exception:
-                        continue
-                for name in module_names:
-                    if any(name.endswith(str(t)) for t in candidate):
-                        chosen_targets = candidate
-                        found = True
-                        break
-            except Exception:
-                continue
-            if found:
-                break
-        if chosen_targets is None:
-            raise ValueError("Could not determine target_modules for LoRA. Please inspect the base model architecture.")
+        
+        found_modules: Set[str] = set()
+        for name, _ in self.model.named_modules():
+            if isinstance(name, str):
+                for target in possible_target_modules:
+                    if target in name:
+                        base_name = name.split('.')[-1]
+                        found_modules.add(base_name)
+
+        if found_modules:
+            target_modules = list(found_modules)
+        else:
+            raise ValueError("Could not automatically determine target_modules for LoRA.")
 
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -59,15 +65,17 @@ class ExpertManager:
             r=r if r is not None else self.lora_r,
             lora_alpha=lora_alpha if lora_alpha is not None else self.lora_alpha,
             lora_dropout=lora_dropout if lora_dropout is not None else self.lora_dropout,
-            target_modules=chosen_targets
+            target_modules=target_modules
         )
 
-        # The peft library directly modifies the model in place
-        if not isinstance(self.model, PeftModel):
-            # Peft returns a PeftModel subtype; ignore type narrowing complaints
-            self.model = get_peft_model(self.model, peft_config, adapter_name=f"expert_{expert_id}")  # type: ignore[assignment]
+        if not isinstance(self.model, (PeftModel, PeftMixedModel)):
+            self.model = get_peft_model(self.model, peft_config, adapter_name=adapter_name)
         else:
-            self.model.add_adapter(f"expert_{expert_id}", peft_config)
+            self.model.add_adapter(adapter_name, peft_config)
+
+        # Offload the newly created adapter to CPU
+        for module in self._get_adapter_modules(expert_id):
+            module.to('cpu')
 
         self.expert_configs[expert_id] = peft_config
         self.num_experts += 1
@@ -76,7 +84,22 @@ class ExpertManager:
 
     def set_active_expert(self, expert_id: int) -> None:
         """
-        Sets the active LoRA expert for the model.
+        Sets the active LoRA expert, moving it to the GPU and offloading the previous one.
         """
-        if isinstance(self.model, PeftModel):
+        if expert_id == self.current_expert_id:
+            return
+
+        if isinstance(self.model, (PeftModel, PeftMixedModel)):
+            device = self.model.device
+
+            # Offload the previously active expert, if any
+            if self.current_expert_id is not None:
+                for module in self._get_adapter_modules(self.current_expert_id):
+                    module.to('cpu')
+
+            # Load the new expert to the correct device
+            for module in self._get_adapter_modules(expert_id):
+                module.to(device)
+
             self.model.set_adapter(f"expert_{expert_id}")
+            self.current_expert_id = expert_id

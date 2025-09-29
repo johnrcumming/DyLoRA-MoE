@@ -130,6 +130,7 @@ def main(args):
         greater_is_better=False,
         report_to="wandb",
         remove_unused_columns=False,
+        dataloader_pin_memory=False,  # <-- disable pin_memory
     )
 
     # 5. Instantiate the trainer
