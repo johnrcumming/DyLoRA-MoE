@@ -203,6 +203,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs.")
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 mixed precision.")
     parser.add_argument("--bf16", action="store_true", help="Enable BF16 mixed precision.")
-    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint to resume training from.")
+    parser.add_argument("--resume_from_checkpoint", action="store_true", help="Resume training from the latest checkpoint.")
     args = parser.parse_args()
     main(args)
