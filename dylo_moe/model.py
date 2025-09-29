@@ -223,6 +223,7 @@ class DyLoRA_MoE(nn.Module):
                 normed = norm_layer(hidden_states)
             else:
                 norm_layer = torch.nn.LayerNorm(hidden_states.size(-1), eps=1e-6)
+                norm_layer.to(hidden_states.device)
                 normed = norm_layer(hidden_states)
             skill_embedding = normed.mean(dim=1)  # [batch, hidden]
 

@@ -110,7 +110,7 @@ def main(args):
         num_train_epochs=args.num_epochs,  # Reduced from 10
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=5,
         gradient_checkpointing=True,
         learning_rate=1e-4,
         lr_scheduler_type="cosine",
@@ -120,16 +120,17 @@ def main(args):
         logging_dir='./logs_poc',
         logging_steps=10,
         logging_strategy="steps",
-        eval_strategy="steps",
-        eval_steps=50,
-        save_strategy="steps",
-        save_steps=50,
+        eval_strategy="epoch",
+        #eval_steps=,
+        save_strategy="epoch",
+        #save_steps=10,
         save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
+        prediction_loss_only=True,
         report_to="wandb",
-        remove_unused_columns=False,
+        remove_unused_columns=True,
         dataloader_pin_memory=False,  # <-- disable pin_memory
     )
 
@@ -198,7 +199,7 @@ def main(args):
 
         # Log routing metrics if multiple experts
         if model.router.num_experts > 1:
-            sample = torch.tensor(dataset[0:1]["input_ids"])
+            sample = torch.tensor(dataset[0:1]["input_ids"]).to(device)
             with torch.no_grad():
                 outputs = model.foundation_model(sample, attention_mask=(sample != tokenizer.pad_token_id), output_hidden_states=True)
                 hidden_states = outputs.hidden_states[-1]
