@@ -132,6 +132,8 @@ def main(args):
     trainer = Trainer(
         model=model,
         args=training_args,
+        train_dataset=Dataset.from_dict({}), # Dummy dataset, will be replaced in the loop
+        eval_dataset=alpaca_eval,
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
