@@ -152,20 +152,15 @@ def main(args):
         
         device = trainer.args.device
         
-        is_novel = False
-        batch_size = 16 # Process in larger batches for novelty detection
-        for j in tqdm(range(0, len(dataset), batch_size), desc=f"Detecting novelty for skill {i+1}"):
-            batch = dataset[j:j+batch_size]["input_ids"]
-            if model.add_new_skill(torch.tensor(batch).to(device)):
-                is_novel = True
-                # No need to check the whole dataset if novelty is found
-                break
+        # We are forcing a new expert for each skill in the data stream
+        is_novel = True
+        model.add_new_skill(force=True)
 
         if is_novel:
             print("Novel skill detected. Training new expert...")
             trainer.train_dataset = dataset
             trainer.eval_dataset = alpaca_eval if i == 0 else mbpp_eval # Evaluate on the corresponding dataset
-            trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+            trainer.train(resume_from_checkpoint=True if args.resume_from_checkpoint else None)
             model.router.set_expert_maturity(model.expert_manager.num_experts - 1, 1)
             wandb.log({"num_experts": model.expert_manager.num_experts})
         else:
