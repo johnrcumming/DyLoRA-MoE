@@ -153,8 +153,7 @@ def main(args):
         device = trainer.args.device
         
         # We are forcing a new expert for each skill in the data stream
-        is_novel = True
-        model.add_new_skill(force=True)
+        is_novel = model.add_new_skill(force=True)
 
         if is_novel:
             print("Novel skill detected. Training new expert...")

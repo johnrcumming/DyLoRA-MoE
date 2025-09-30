@@ -202,32 +202,38 @@ class DyLoRA_MoE(nn.Module):
         """
         self.foundation_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
 
-    def add_new_skill(self, skill_data: torch.Tensor, batch_size: int = 16, warmup_steps: int = 50):
+    def add_new_skill(self, skill_data: torch.Tensor | None = None, force: bool = False, batch_size: int = 16, warmup_steps: int = 50):
         """
         Adds a new skill to the model.
+        If `force` is True, a new expert is created without novelty detection.
         """
-        # 1. Detect if the skill is novel
-        # Get the router output for the new skill data
-        with torch.no_grad():
-            all_hidden_states = []
-            for i in range(0, skill_data.size(0), batch_size):
-                batch = skill_data[i:i+batch_size]
-                outputs = self.foundation_model(batch, attention_mask=(batch != 0), output_hidden_states=True)
-                all_hidden_states.append(outputs.hidden_states[-1])
-            
-            hidden_states = torch.cat(all_hidden_states, dim=0)
-            _ = self.router(hidden_states)  # force same path, discard
-            # Improved embedding: token mean after RMSNorm (if available) else LayerNorm fallback
-            if hasattr(self.foundation_model, 'model') and hasattr(self.foundation_model.model, 'norm'):
-                norm_layer = self.foundation_model.model.norm  # type: ignore[attr-defined]
-                normed = norm_layer(hidden_states)
-            else:
-                norm_layer = torch.nn.LayerNorm(hidden_states.size(-1), eps=1e-6)
-                norm_layer.to(hidden_states.device)
-                normed = norm_layer(hidden_states)
-            skill_embedding = normed.mean(dim=1)  # [batch, hidden]
+        is_novel = False
+        if force:
+            is_novel = True
+        elif skill_data is not None:
+            # 1. Detect if the skill is novel
+            # Get the router output for the new skill data
+            with torch.no_grad():
+                all_hidden_states = []
+                for i in range(0, skill_data.size(0), batch_size):
+                    batch = skill_data[i:i+batch_size]
+                    outputs = self.foundation_model(batch, attention_mask=(batch != 0), output_hidden_states=True)
+                    all_hidden_states.append(outputs.hidden_states[-1])
+                
+                hidden_states = torch.cat(all_hidden_states, dim=0)
+                _ = self.router(hidden_states)  # force same path, discard
+                # Improved embedding: token mean after RMSNorm (if available) else LayerNorm fallback
+                if hasattr(self.foundation_model, 'model') and hasattr(self.foundation_model.model, 'norm'):
+                    norm_layer = self.foundation_model.model.norm  # type: ignore[attr-defined]
+                    normed = norm_layer(hidden_states)
+                else:
+                    norm_layer = torch.nn.LayerNorm(hidden_states.size(-1), eps=1e-6)
+                    norm_layer.to(hidden_states.device)
+                    normed = norm_layer(hidden_states)
+                skill_embedding = normed.mean(dim=1)  # [batch, hidden]
 
-        is_novel = self.novelty_detector.is_novel(skill_embedding)
+            is_novel = self.novelty_detector.is_novel(skill_embedding)
+        
         if is_novel:
             # 2. Create a new expert
             # Increase adapter capacity slightly for later experts
@@ -236,8 +242,9 @@ class DyLoRA_MoE(nn.Module):
             self.router.add_expert(device=self.foundation_model.device)
             self.expert_manager.set_active_expert(new_expert_id)
             
-            # Add the new skill to the library
-            self.skill_library.add_skill(new_expert_id, torch.mean(skill_embedding, dim=0))
+            # Add the new skill to the library if we have skill data
+            if not force and skill_data is not None:
+                self.skill_library.add_skill(new_expert_id, torch.mean(skill_embedding, dim=0))
 
             # 3. Train the new expert (this will be a separate training loop)
             print(f"New skill detected. Created expert {new_expert_id} (r={dynamic_r}).")

@@ -33,10 +33,10 @@ if not hf_token:
 worker_pool_specs = [
     {
         "machine_spec": {
-            #"machine_type": "a2-highgpu-1g",
-            #"accelerator_type": "NVIDIA_TESLA_A100",
-            "machine_type": "a3-highgpu-1g",
-            "accelerator_type": "NVIDIA_H100_80GB",
+            "machine_type": "a2-highgpu-1g",
+            "accelerator_type": "NVIDIA_TESLA_A100",
+            #"machine_type": "a3-highgpu-1g",
+            #"accelerator_type": "NVIDIA_H100_80GB",
             "accelerator_count": 1,
         },
         "replica_count": 1,
