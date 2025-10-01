@@ -1,8 +1,9 @@
 from transformers import PreTrainedModel
 from peft import get_peft_model, LoraConfig, TaskType, PeftModel, PeftMixedModel
 from peft.tuners.lora import LoraLayer
+import torch
 import torch.nn as nn
-from typing import Set, List, Union
+from typing import Set, List, Union, Dict
 
 class ExpertManager:
     """
@@ -103,3 +104,32 @@ class ExpertManager:
 
             self.model.set_adapter(f"expert_{expert_id}")
             self.current_expert_id = expert_id
+
+    def get_expert_weights(self, expert_id: int) -> Dict[str, torch.Tensor]:
+        """Gets the state dictionary of a specific expert's trainable weights."""
+        adapter_name = f"expert_{expert_id}"
+        weights: Dict[str, torch.Tensor] = {}
+        if not isinstance(self.model, (PeftModel, PeftMixedModel)):
+            return weights
+
+        for name, param in self.model.named_parameters():
+            if adapter_name in name or "lm_head" in name:
+                if param.requires_grad:
+                    weights[name] = param.data.clone().cpu()
+        return weights
+
+    def load_expert_weights(self, expert_id: int, weights: Dict[str, torch.Tensor]):
+        """Loads a state dictionary into a specific expert's weights."""
+        adapter_name = f"expert_{expert_id}"
+        if not isinstance(self.model, (PeftModel, PeftMixedModel)):
+            return
+
+        # Ensure the adapter exists
+        if adapter_name not in self.model.peft_config:
+            # This assumes the config for the expert was already created
+            self.model.add_adapter(adapter_name, self.expert_configs[expert_id])
+
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                if name in weights:
+                    param.data.copy_(weights[name])

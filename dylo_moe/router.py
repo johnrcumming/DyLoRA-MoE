@@ -7,7 +7,7 @@ class DynamicHybridRouter(nn.Module):
     Implements the Dynamic Hybrid Router for the DyLoRA-MoE architecture.
     """
     def __init__(self, input_size: int, num_experts: int, top_k: int = 1, temperature: float = 2.0):
-        super(DynamicHybridRouter, self).__init__()
+        super().__init__()
         self.top_k = top_k
         self.input_size = input_size
         self.num_experts = num_experts
@@ -66,3 +66,31 @@ class DynamicHybridRouter(nn.Module):
         Sets the maturity of an expert.
         """
         self.expert_maturity[expert_id] = maturity
+
+    def save(self, path: str):
+        """Saves the router's state to a file."""
+        state = {
+            'gate_state_dict': self.gate.state_dict(),
+            'expert_maturity': self.expert_maturity,
+            'num_experts': self.num_experts,
+            'input_size': self.input_size,
+            'top_k': self.top_k,
+            'temperature': self.temperature
+        }
+        torch.save(state, path)
+
+    @classmethod
+    def load(cls, path: str, device: torch.device | None = None):
+        """Loads a router's state from a file."""
+        state = torch.load(path, map_location=device)
+        router = cls(
+            input_size=state['input_size'],
+            num_experts=state['num_experts'],
+            top_k=state['top_k'],
+            temperature=state['temperature']
+        )
+        router.gate.load_state_dict(state['gate_state_dict'])
+        router.expert_maturity = state['expert_maturity']
+        if device:
+            router.to(device)
+        return router

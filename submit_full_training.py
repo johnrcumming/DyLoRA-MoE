@@ -12,12 +12,11 @@ REGION = "us-central1"
 DOCKER_REPO_NAME = "dy-lora-training-repo"
 IMAGE_NAME = "dy-lora-training-image"
 IMAGE_TAG = "latest"
+# Initialize the Vertex AI SDK
+aiplatform.init(project=PROJECT_ID, location=REGION, staging_bucket=f"gs://{BUCKET_NAME}")
 
 # Authenticate with the service account
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "dylora-ece7d9f1337d.json"
-
-# Initialize the Vertex AI SDK
-aiplatform.init(project=PROJECT_ID, location=REGION, staging_bucket=f"gs://{BUCKET_NAME}")
 
 # Get WANDB_API_KEY from environment
 wandb_api_key = os.environ.get("WANDB_API_KEY")
@@ -54,7 +53,7 @@ worker_pool_specs = [
 
 # Define the custom job
 job = aiplatform.CustomJob(
-    display_name="full-software-development-training-job",
+    display_name="full-software-development-training-job-spot",
     worker_pool_specs=worker_pool_specs,
 )
 
@@ -73,5 +72,3 @@ job.run(
     timeout=86400,  # 24 hours
     restart_job_on_worker_restart=True,
 )
-
-print("Software development training job submitted successfully.")

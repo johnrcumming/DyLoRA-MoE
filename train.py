@@ -18,7 +18,7 @@ from transformers.tokenization_utils_base import BatchEncoding
 from typing import Union, Dict, Iterable, Any
 
 from dylo_moe.model import DyLoRA_MoE
-from dylo_moe.utils import print_trainable_parameters
+from dylo_moe.utils import print_trainable_parameters, save_dylo_moe_state, save_lora_experts
 from data.prepare_data import download_mbpp, download_code_alpaca
 
 def preprocess_evaluation_dataset(tokenizer, dataset):
@@ -73,10 +73,9 @@ def main(args):
     wandb.init(project="dylo-moe-full-training")
 
     # 2. Instantiate the model
-    model_name = "google/codegemma-2b"
     hf_token = os.environ.get("HF_TOKEN")
     model = DyLoRA_MoE(
-        model_name,
+        args.model_name,
         num_experts=1,
         token=hf_token,
         lora_r=16,
@@ -85,7 +84,7 @@ def main(args):
     )
 
     # 3. Create tokenizer and data stream
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
     
     # 4. Load datasets
@@ -95,6 +94,14 @@ def main(args):
     # Create a data stream similar to poc_train.py
     skill1_data = [ex['instruction'] + "\n" + ex['output'] for ex in code_alpaca_dataset['train']]
     skill2_data = [ex['text'] for ex in mbpp_dataset['train']]
+    
+    if args.training_subset:
+        subset_size = int(len(skill1_data) * (args.training_subset / 100))
+        skill1_data = skill1_data[:subset_size]
+        
+        subset_size = int(len(skill2_data) * (args.training_subset / 100))
+        skill2_data = skill2_data[:subset_size]
+
     data_stream = [skill1_data, skill2_data]
 
 
@@ -126,8 +133,20 @@ def main(args):
     )
 
     # 6. Instantiate the trainer
-    alpaca_eval = preprocess_evaluation_dataset(tokenizer, code_alpaca_dataset["validation"])
-    mbpp_eval = preprocess_evaluation_dataset(tokenizer, mbpp_dataset["validation"])
+    
+    # Optionally subset the evaluation data
+    if args.eval_subset:
+        val_subset_size_alpaca = int(len(code_alpaca_dataset["validation"]) * (args.eval_subset / 100))
+        alpaca_eval_dataset = code_alpaca_dataset["validation"].select(range(val_subset_size_alpaca))
+        
+        val_subset_size_mbpp = int(len(mbpp_dataset["validation"]) * (args.eval_subset / 100))
+        mbpp_eval_dataset = mbpp_dataset["validation"].select(range(val_subset_size_mbpp))
+    else:
+        alpaca_eval_dataset = code_alpaca_dataset["validation"]
+        mbpp_eval_dataset = mbpp_dataset["validation"]
+
+    alpaca_eval = preprocess_evaluation_dataset(tokenizer, alpaca_eval_dataset)
+    mbpp_eval = preprocess_evaluation_dataset(tokenizer, mbpp_eval_dataset)
     
     trainer = Trainer(
         model=model,
@@ -184,10 +203,33 @@ def main(args):
     tokenizer.save_pretrained("./results_full/best_model")
     print("Best model saved to ./results_full/best_model")
 
-    # 11. Print the final model architecture and trainable parameters
-    print("\n--- Final Model Architecture ---")
+    # 10. Save the best model, trainer state, and DyLoRA-MoE state
+    print("--- Saving Best Model and Full State ---")
+    best_model_dir = "./results_full/best_model"
+    
+    # Save model, tokenizer, and training arguments
+    trainer.save_model(best_model_dir)
+    trainer.save_state()  # Saves optimizer, scheduler, etc. to output_dir
+    tokenizer.save_pretrained(best_model_dir)
+    torch.save(training_args, os.path.join(training_args.output_dir, "training_args.bin"))
+    print(f"Best model, tokenizer, and training args saved to {best_model_dir} and {training_args.output_dir}")
+
+    # Save DyLoRA-MoE specific state
+    dylo_moe_state_dir = os.path.join(training_args.output_dir, "dylo_moe_state")
+    save_dylo_moe_state(model, dylo_moe_state_dir)
+    print(f"DyLoRA-MoE state saved to {dylo_moe_state_dir}")
+
+    # 11. Upload the entire output directory as a wandb artifact
+    print("--- Uploading Artifacts to W&B ---")
+    artifact = wandb.Artifact('best-dylora-model-full', type='model')
+    artifact.add_dir(training_args.output_dir)
+    wandb.log_artifact(artifact)
+    print("Best model, trainer state, and DyLoRA-MoE state saved and uploaded to wandb.")
+
+    # 12. Print the final model architecture and trainable parameters
+    print("--- Final Model Architecture ---")
     print(model)
-    print("\n--- Trainable Parameters ---")
+    print("--- Trainable Parameters ---")
     print_trainable_parameters(model)
 
     wandb.finish()
@@ -198,5 +240,8 @@ if __name__ == "__main__":
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 mixed precision.")
     parser.add_argument("--bf16", action="store_true", help="Enable BF16 mixed precision.")
     parser.add_argument("--resume_from_checkpoint", action="store_true", help="Resume training from the latest checkpoint.")
+    parser.add_argument("--training_subset", type=int, default=None, help="Percentage of training data to use.")
+    parser.add_argument("--eval_subset", type=int, default=None, help="Percentage of evaluation data to use.")
+    parser.add_argument("--model_name", type=str, default="google/codegemma-2b", help="The base model to use.")
     args = parser.parse_args()
     main(args)

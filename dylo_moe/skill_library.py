@@ -21,3 +21,15 @@ class SkillLibrary:
         if not self.skill_embeddings:
             return None
         return torch.stack(list(self.skill_embeddings.values()))
+
+    def save(self, path: str):
+        """Saves the skill library to a file."""
+        torch.save(self.skill_embeddings, path)
+
+    @classmethod
+    def load(cls, path: str, embedding_size: int, device: torch.device | None = None):
+        """Loads a skill library from a file."""
+        skill_embeddings = torch.load(path, map_location=device)
+        library = cls(embedding_size)
+        library.skill_embeddings = skill_embeddings
+        return library

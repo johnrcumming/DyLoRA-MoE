@@ -40,23 +40,27 @@ class DyLoRA_MoE(nn.Module):
             self.foundation_model.lm_head.weight = nn.Parameter(lm_head_weights.clone())
         self._log_trainable_parameters("After initializing lm_head")
 
-        # 3. Expert manager + first expert
+        # 3. Expert manager + initial experts
         self.expert_manager = ExpertManager(self.foundation_model, lora_r, lora_alpha, lora_dropout)
-        first_expert_id = self.expert_manager.create_expert()
-        self.expert_manager.set_active_expert(first_expert_id)
+        for _ in range(num_experts):
+            self.expert_manager.create_expert()
+        
+        if num_experts > 0:
+            self.expert_manager.set_active_expert(0)
+
         self.foundation_model = self.expert_manager.model
 
         # 4. Freeze non-LoRA params except lm_head
         for name, param in self.foundation_model.named_parameters():
             if "lora" not in name.lower() and "lm_head" not in name.lower():
                 param.requires_grad = False
-        self._log_trainable_parameters("After attaching first expert & freezing base")
+        self._log_trainable_parameters("After attaching initial experts & freezing base")
 
         # 5. Router
         hidden_size = int(getattr(self.foundation_model.config, "hidden_size"))  # type: ignore[arg-type]
         self.router = DynamicHybridRouter(input_size=hidden_size, num_experts=num_experts)
-        if self.router.expert_maturity.numel() > 0:
-            self.router.expert_maturity[0] = 1
+        for i in range(num_experts):
+            self.router.set_expert_maturity(i, 1)
 
         # 6. Skill library & novelty detector
         self.skill_library = SkillLibrary(embedding_size=hidden_size)
@@ -252,5 +256,8 @@ class DyLoRA_MoE(nn.Module):
             # Ensure mature status of prior experts
             if new_expert_id > 0:
                 self.router.set_expert_maturity(new_expert_id - 1, 1)
+            
+            # Ensure the maturity tensor is on the correct device
+            self.router.expert_maturity = self.router.expert_maturity.to(self.foundation_model.device)
         
         return is_novel
