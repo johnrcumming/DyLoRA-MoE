@@ -39,7 +39,7 @@ class DynamicHybridRouter(nn.Module):
             
             # Create a sparse tensor with the top-k weights
             routing_weights = torch.zeros_like(logits)
-            routing_weights.scatter_(-1, top_k_indices, F.softmax(top_k_weights, dim=-1))
+            routing_weights.scatter_(-1, top_k_indices, F.softmax(top_k_weights, dim=-1).to(routing_weights.dtype))
 
         return routing_weights
 

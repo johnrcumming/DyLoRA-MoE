@@ -41,7 +41,7 @@ worker_pool_specs = [
         "replica_count": 1,
         "container_spec": {
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
-            "command": ["python", "train.py", "--resume_from_checkpoint"],
+            "command": ["python", "train.py", "--resume_from_checkpoint", "--fp16"],
             "args": [],
             "env": [
                 {"name": "WANDB_API_KEY", "value": wandb_api_key},
@@ -72,3 +72,6 @@ job.run(
     timeout=86400,  # 24 hours
     restart_job_on_worker_restart=True,
 )
+
+print("Job finished. Final state:")
+print(job.state)
