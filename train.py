@@ -76,7 +76,7 @@ def main(args):
     hf_token = os.environ.get("HF_TOKEN")
     model = DyLoRA_MoE(
         args.model_name,
-        num_experts=1,
+        num_experts=args.num_experts,
         token=hf_token,
         lora_r=16,
         lora_alpha=32,
@@ -243,5 +243,6 @@ if __name__ == "__main__":
     parser.add_argument("--training_subset", type=int, default=None, help="Percentage of training data to use.")
     parser.add_argument("--eval_subset", type=int, default=None, help="Percentage of evaluation data to use.")
     parser.add_argument("--model_name", type=str, default="google/codegemma-2b", help="The base model to use.")
+    parser.add_argument("--num_experts", type=int, default=1, help="Initial number of experts.")
     args = parser.parse_args()
     main(args)
