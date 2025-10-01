@@ -78,9 +78,10 @@ def main(args):
         args.model_name,
         num_experts=args.num_experts,
         token=hf_token,
-        lora_r=16,
-        lora_alpha=32,
-        lora_dropout=0.05
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        allow_expert_growth=args.allow_expert_growth
     )
 
     # 3. Create tokenizer and data stream
@@ -236,13 +237,17 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs.")
+    parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 mixed precision.")
     parser.add_argument("--bf16", action="store_true", help="Enable BF16 mixed precision.")
     parser.add_argument("--resume_from_checkpoint", action="store_true", help="Resume training from the latest checkpoint.")
     parser.add_argument("--training_subset", type=int, default=None, help="Percentage of training data to use.")
     parser.add_argument("--eval_subset", type=int, default=None, help="Percentage of evaluation data to use.")
     parser.add_argument("--model_name", type=str, default="google/codegemma-2b", help="The base model to use.")
-    parser.add_argument("--num_experts", type=int, default=1, help="Initial number of experts.")
+    parser.add_argument("--num_experts", type=int, default=16, help="Initial number of experts.")
+    parser.add_argument("--allow_expert_growth", action="store_true", help="Allow the model to add new experts during training.")
+    parser.add_argument("--lora_r", type=int, default=16, help="LoRA r value.")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha value.")
+    parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout value.")
     args = parser.parse_args()
     main(args)

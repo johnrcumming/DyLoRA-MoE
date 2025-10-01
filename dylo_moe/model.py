@@ -10,8 +10,9 @@ class DyLoRA_MoE(nn.Module):
     """
     Implements the Dynamic LoRA-based Mixture-of-Experts (DyLoRA-MoE) architecture.
     """
-    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05, token: str | None = None):
+    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05, token: str | None = None, allow_expert_growth: bool = True):
         super().__init__()
+        self.allow_expert_growth = allow_expert_growth
 
         # 1. Load base model
         self.foundation_model = AutoModelForCausalLM.from_pretrained(
@@ -210,7 +211,11 @@ class DyLoRA_MoE(nn.Module):
         """
         Adds a new skill to the model.
         If `force` is True, a new expert is created without novelty detection.
+        If `allow_expert_growth` is False, no new experts will be created unless forced.
         """
+        if not self.allow_expert_growth and not force:
+            return False
+
         is_novel = False
         if force:
             is_novel = True
