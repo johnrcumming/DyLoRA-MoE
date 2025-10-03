@@ -51,9 +51,9 @@ class DyLoRA_MoE(nn.Module):
 
         self.foundation_model = self.expert_manager.model
 
-        # 4. Freeze non-LoRA params except lm_head
+        # 4. Freeze all non-LoRA params (including lm_head for standard LoRA efficiency)
         for name, param in self.foundation_model.named_parameters():
-            if "lora" not in name.lower() and "lm_head" not in name.lower():
+            if "lora" not in name.lower():
                 param.requires_grad = False
         self._log_trainable_parameters("After attaching initial experts & freezing base")
 

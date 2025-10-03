@@ -1,14 +1,13 @@
 from transformers import PreTrainedModel
 from peft import get_peft_model, LoraConfig, TaskType, PeftModel, PeftMixedModel
-from peft.tuners.lora import LoraLayer
 import torch
-import torch.nn as nn
 from typing import Set, List, Union, Dict
 
 class ExpertManager:
     """
-    Manages the creation and application of LoRA experts, including offloading
-    inactive experts to CPU memory to conserve GPU VRAM.
+    Manages the creation and application of LoRA experts.
+    All LoRA adapters share the same frozen base model weights (handled by PEFT),
+    minimizing memory usage. Only the small LoRA adapter weights differ between experts.
     """
     def __init__(self, model: PreTrainedModel, lora_r: int, lora_alpha: int, lora_dropout: float):
         self.model: Union[PreTrainedModel, PeftModel, PeftMixedModel] = model
@@ -19,24 +18,11 @@ class ExpertManager:
         self.expert_configs: dict[int, LoraConfig] = {}
         self.current_expert_id: int | None = None
 
-    def _get_adapter_modules(self, expert_id: int) -> List[nn.Module]:
-        """Helper to get all nn.Module layers for a specific adapter."""
-        adapter_name = f"expert_{expert_id}"
-        adapter_modules: List[nn.Module] = []
-
-        if not isinstance(self.model, (PeftModel, PeftMixedModel)):
-            return adapter_modules
-
-        for module in self.model.modules():
-            if isinstance(module, LoraLayer):
-                if adapter_name in module.lora_A:
-                    adapter_modules.append(module.lora_A[adapter_name])
-                if adapter_name in module.lora_B:
-                    adapter_modules.append(module.lora_B[adapter_name])
-        return adapter_modules
-
     def create_expert(self, r: int | None = None, lora_alpha: int | None = None, lora_dropout: float | None = None) -> int:
-        """Create a new LoRA expert and immediately offload it to the CPU."""
+        """
+        Create a new LoRA expert. All experts share the same frozen base model weights.
+        Only the small LoRA adapter parameters (A and B matrices) are unique per expert.
+        """
         expert_id = self.num_experts
         adapter_name = f"expert_{expert_id}"
 
@@ -70,13 +56,11 @@ class ExpertManager:
         )
 
         if not isinstance(self.model, (PeftModel, PeftMixedModel)):
+            # First expert: wrap the base model
             self.model = get_peft_model(self.model, peft_config, adapter_name=adapter_name)
         else:
+            # Additional experts: add new adapter (shares base weights automatically)
             self.model.add_adapter(adapter_name, peft_config)
-
-        # Offload the newly created adapter to CPU
-        for module in self._get_adapter_modules(expert_id):
-            module.to('cpu')
 
         self.expert_configs[expert_id] = peft_config
         self.num_experts += 1
@@ -85,23 +69,13 @@ class ExpertManager:
 
     def set_active_expert(self, expert_id: int) -> None:
         """
-        Sets the active LoRA expert, moving it to the GPU and offloading the previous one.
+        Sets the active LoRA expert by switching which adapter is used.
+        All adapters remain in GPU memory and share the same frozen base weights.
         """
         if expert_id == self.current_expert_id:
             return
 
         if isinstance(self.model, (PeftModel, PeftMixedModel)):
-            device = self.model.device
-
-            # Offload the previously active expert, if any
-            if self.current_expert_id is not None:
-                for module in self._get_adapter_modules(self.current_expert_id):
-                    module.to('cpu')
-
-            # Load the new expert to the correct device
-            for module in self._get_adapter_modules(expert_id):
-                module.to(device)
-
             self.model.set_adapter(f"expert_{expert_id}")
             self.current_expert_id = expert_id
 
