@@ -244,7 +244,7 @@ if __name__ == "__main__":
     parser.add_argument("--training_subset", type=int, default=None, help="Percentage of training data to use.")
     parser.add_argument("--eval_subset", type=int, default=None, help="Percentage of evaluation data to use.")
     parser.add_argument("--model_name", type=str, default="google/codegemma-2b", help="The base model to use.")
-    parser.add_argument("--num_experts", type=int, default=16, help="Initial number of experts.")
+    parser.add_argument("--num_experts", type=int, default=1, help="Initial number of experts.")
     parser.add_argument("--allow_expert_growth", action="store_true", help="Allow the model to add new experts during training.")
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA r value.")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha value.")
