@@ -81,8 +81,41 @@ def main(args):
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
-        allow_expert_growth=args.allow_expert_growth
+        allow_expert_growth=False  # Disable dynamic expert growth for traditional training
     )
+    
+    # Mark all experts as mature so router uses sparse delegation from the start
+    for i in range(model.expert_manager.num_experts):
+        model.router.set_expert_maturity(i, 1)
+    
+    print(f"Initialized {model.expert_manager.num_experts} experts (all marked as mature)")
+    
+    # Ensure all LoRA parameters are trainable
+    print("\n--- Verifying trainable parameters ---")
+    lora_params = 0
+    router_params = 0
+    lm_head_params = 0
+    frozen_params = 0
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if "lora" in name.lower():
+                lora_params += param.numel()
+            elif "router" in name.lower() or "gate" in name.lower():
+                router_params += param.numel()
+            elif "lm_head" in name.lower():
+                lm_head_params += param.numel()
+        else:
+            frozen_params += param.numel()
+    
+    print(f"LoRA parameters: {lora_params:,} (trainable)")
+    print(f"Router parameters: {router_params:,} (trainable)")
+    print(f"LM Head parameters: {lm_head_params:,} (trainable)")
+    print(f"Frozen parameters: {frozen_params:,}")
+    print(f"Total trainable: {lora_params + router_params + lm_head_params:,}")
+    
+    if lora_params == 0:
+        raise ValueError("No LoRA parameters are trainable! Check model initialization.")
 
     # 3. Create tokenizer and data stream
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=hf_token)
@@ -92,18 +125,18 @@ def main(args):
     code_alpaca_dataset = download_code_alpaca(filter_python=False, with_validation=True)
     mbpp_dataset = download_mbpp(with_validation=True)
     
-    # Create a data stream similar to poc_train.py
+    # Combine both datasets into a single training set
     skill1_data = [ex['instruction'] + "\n" + ex['output'] for ex in code_alpaca_dataset['train']]
     skill2_data = [ex['text'] for ex in mbpp_dataset['train']]
     
+    # Merge the datasets
+    combined_data = skill1_data + skill2_data
+    
     if args.training_subset:
-        subset_size = int(len(skill1_data) * (args.training_subset / 100))
-        skill1_data = skill1_data[:subset_size]
-        
-        subset_size = int(len(skill2_data) * (args.training_subset / 100))
-        skill2_data = skill2_data[:subset_size]
-
-    data_stream = [skill1_data, skill2_data]
+        subset_size = int(len(combined_data) * (args.training_subset / 100))
+        combined_data = combined_data[:subset_size]
+    
+    print(f"Combined training dataset size: {len(combined_data)} examples")
 
 
     # 5. Configure the training arguments
@@ -149,10 +182,13 @@ def main(args):
     alpaca_eval = preprocess_evaluation_dataset(tokenizer, alpaca_eval_dataset)
     mbpp_eval = preprocess_evaluation_dataset(tokenizer, mbpp_eval_dataset)
     
+    # Create the combined training dataset
+    train_dataset = preprocess_training_dataset(tokenizer, combined_data, pack=True)
+    
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=Dataset.from_dict({}), # Dummy dataset, will be replaced in the loop
+        train_dataset=train_dataset,
         eval_dataset=alpaca_eval,
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
@@ -160,43 +196,30 @@ def main(args):
 
     # 7. Initial Evaluation
     print("\n--- Initial Evaluation ---")
-    initial_metrics = trainer.evaluate(mbpp_eval)
-    print(f"Initial MBPP Validation Loss: {initial_metrics['eval_loss']}")
-    wandb.log({"initial_mbpp_validation_loss": initial_metrics['eval_loss']})
+    alpaca_initial = trainer.evaluate(alpaca_eval, metric_key_prefix="eval_alpaca")
+    mbpp_initial = trainer.evaluate(mbpp_eval, metric_key_prefix="eval_mbpp")
+    print(f"Initial Code Alpaca Loss: {alpaca_initial['eval_alpaca_loss']:.4f}")
+    print(f"Initial MBPP Loss: {mbpp_initial['eval_mbpp_loss']:.4f}")
+    wandb.log({
+        "initial_alpaca_loss": alpaca_initial['eval_alpaca_loss'],
+        "initial_mbpp_loss": mbpp_initial['eval_mbpp_loss']
+    })
 
-    # 8. Continual learning loop
-    for i, skill_data in enumerate(data_stream):
-        print(f"\n--- Processing Skill {i+1} ---")
-        
-        dataset = preprocess_training_dataset(tokenizer, skill_data, pack=True)
-        
-        device = trainer.args.device
-        
-        # We are forcing a new expert for each skill in the data stream
-        is_novel = model.add_new_skill(force=True)
+    # 8. Train the model on the combined dataset
+    print("\n--- Training on Combined Dataset ---")
+    print(f"Training with {model.expert_manager.num_experts} experts")
+    trainer.train(resume_from_checkpoint=True if args.resume_from_checkpoint else None)
 
-        if is_novel:
-            print("Novel skill detected. Training new expert...")
-            trainer.train_dataset = dataset
-            trainer.eval_dataset = alpaca_eval if i == 0 else mbpp_eval # Evaluate on the corresponding dataset
-            trainer.train(resume_from_checkpoint=True if args.resume_from_checkpoint else None)
-            model.router.set_expert_maturity(model.expert_manager.num_experts - 1, 1)
-            wandb.log({"num_experts": model.expert_manager.num_experts})
-        else:
-            print("Skill not novel. Skipping training.")
-
-        # Evaluate per-domain losses
-        alpaca_loss = trainer.evaluate(alpaca_eval, metric_key_prefix="eval_alpaca")["eval_alpaca_loss"]
-        mbpp_loss = trainer.evaluate(mbpp_eval, metric_key_prefix="eval_mbpp")["eval_mbpp_loss"]
-        wandb.log({"eval_alpaca_loss": alpaca_loss, "eval_mbpp_loss": mbpp_loss})
-
-
-    # 9. Final Evaluation on MBPP test set
-    print("\n--- Final Evaluation on MBPP ---")
-    mbpp_test_eval = preprocess_evaluation_dataset(tokenizer, mbpp_dataset["test"])
-    final_metrics = trainer.evaluate(mbpp_test_eval)
-    print(f"Final MBPP Test Loss: {final_metrics['eval_loss']}")
-    wandb.log({"final_mbpp_test_loss": final_metrics["eval_loss"]})
+    # 9. Final per-domain evaluation
+    print("\n--- Final Evaluation ---")
+    alpaca_final = trainer.evaluate(alpaca_eval, metric_key_prefix="eval_alpaca")
+    mbpp_final = trainer.evaluate(mbpp_eval, metric_key_prefix="eval_mbpp")
+    print(f"Final Code Alpaca Loss: {alpaca_final['eval_alpaca_loss']:.4f}")
+    print(f"Final MBPP Loss: {mbpp_final['eval_mbpp_loss']:.4f}")
+    wandb.log({
+        "final_alpaca_loss": alpaca_final['eval_alpaca_loss'],
+        "final_mbpp_loss": mbpp_final['eval_mbpp_loss']
+    })
 
     # 10. Save the best model
     print("\n--- Saving Best Model ---")
@@ -244,8 +267,7 @@ if __name__ == "__main__":
     parser.add_argument("--training_subset", type=int, default=None, help="Percentage of training data to use.")
     parser.add_argument("--eval_subset", type=int, default=None, help="Percentage of evaluation data to use.")
     parser.add_argument("--model_name", type=str, default="google/codegemma-2b", help="The base model to use.")
-    parser.add_argument("--num_experts", type=int, default=1, help="Initial number of experts.")
-    parser.add_argument("--allow_expert_growth", action="store_true", help="Allow the model to add new experts during training.")
+    parser.add_argument("--num_experts", type=int, default=4, help="Number of LoRA experts to create (fixed at initialization).")
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA r value.")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha value.")
     parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout value.")

@@ -41,7 +41,7 @@ worker_pool_specs = [
         "replica_count": 1,
         "container_spec": {
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
-            "command": ["python", "train.py", "--fp16", "--allow_expert_growth"],
+            "command": ["python", "train.py", "--bf16", "--num_experts", "4"],
             "args": [],
             "env": [
                 {"name": "WANDB_API_KEY", "value": wandb_api_key},
