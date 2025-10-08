@@ -39,6 +39,10 @@ worker_pool_specs = [
             "accelerator_count": 1,
         },
         "replica_count": 1,
+        "disk_spec": {
+            "boot_disk_type": "pd-ssd",  # SSD for faster I/O
+            "boot_disk_size_gb": 200,    # Increase from default 100GB to 200GB
+        },
         "container_spec": {
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
             "command": ["python", "train.py", "--bf16", "--num_experts", "4"],
