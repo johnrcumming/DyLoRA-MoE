@@ -169,7 +169,7 @@ def main(args):
         save_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
+        metric_for_best_model="loss",  # Fixed: use "loss" not "eval_loss"
         greater_is_better=False,
         report_to="wandb",
         remove_unused_columns=True,
@@ -191,6 +191,10 @@ def main(args):
     alpaca_eval = preprocess_evaluation_dataset(tokenizer, alpaca_eval_dataset)
     mbpp_eval = preprocess_evaluation_dataset(tokenizer, mbpp_eval_dataset)
     
+    # Combine evaluation datasets for standard eval metrics
+    # The trainer will use this during training for checkpointing and early stopping
+    combined_eval = concatenate_datasets([alpaca_eval, mbpp_eval])
+    
     # Create the combined training dataset
     train_dataset = preprocess_training_dataset(tokenizer, combined_data, pack=True)
     
@@ -198,20 +202,27 @@ def main(args):
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=alpaca_eval,
+        eval_dataset=combined_eval,  # Use combined dataset for standard evaluation
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
-    # 7. Initial Evaluation
+    # 7. Initial Evaluation (per-domain for analysis)
     print("\n--- Initial Evaluation ---")
-    alpaca_initial = trainer.evaluate(alpaca_eval, metric_key_prefix="eval_alpaca")
-    mbpp_initial = trainer.evaluate(mbpp_eval, metric_key_prefix="eval_mbpp")
-    print(f"Initial Code Alpaca Loss: {alpaca_initial['eval_alpaca_loss']:.4f}")
-    print(f"Initial MBPP Loss: {mbpp_initial['eval_mbpp_loss']:.4f}")
+    print("Combined evaluation:")
+    combined_initial = trainer.evaluate(metric_key_prefix="eval")
+    print(f"Initial Combined Loss: {combined_initial['eval_loss']:.4f}")
+    
+    print("\nPer-domain evaluation:")
+    alpaca_initial = trainer.evaluate(alpaca_eval, metric_key_prefix="alpaca")
+    mbpp_initial = trainer.evaluate(mbpp_eval, metric_key_prefix="mbpp")
+    print(f"  Code Alpaca Loss: {alpaca_initial['alpaca_loss']:.4f}")
+    print(f"  MBPP Loss: {mbpp_initial['mbpp_loss']:.4f}")
+    
     wandb.log({
-        "initial_alpaca_loss": alpaca_initial['eval_alpaca_loss'],
-        "initial_mbpp_loss": mbpp_initial['eval_mbpp_loss']
+        "initial_combined_loss": combined_initial['eval_loss'],
+        "initial_alpaca_loss": alpaca_initial['alpaca_loss'],
+        "initial_mbpp_loss": mbpp_initial['mbpp_loss']
     })
 
     # 8. Train the model on the combined dataset
@@ -221,13 +232,20 @@ def main(args):
 
     # 9. Final per-domain evaluation
     print("\n--- Final Evaluation ---")
-    alpaca_final = trainer.evaluate(alpaca_eval, metric_key_prefix="eval_alpaca")
-    mbpp_final = trainer.evaluate(mbpp_eval, metric_key_prefix="eval_mbpp")
-    print(f"Final Code Alpaca Loss: {alpaca_final['eval_alpaca_loss']:.4f}")
-    print(f"Final MBPP Loss: {mbpp_final['eval_mbpp_loss']:.4f}")
+    print("Combined evaluation:")
+    combined_final = trainer.evaluate(metric_key_prefix="eval")
+    print(f"Final Combined Loss: {combined_final['eval_loss']:.4f}")
+    
+    print("\nPer-domain evaluation:")
+    alpaca_final = trainer.evaluate(alpaca_eval, metric_key_prefix="alpaca")
+    mbpp_final = trainer.evaluate(mbpp_eval, metric_key_prefix="mbpp")
+    print(f"  Code Alpaca Loss: {alpaca_final['alpaca_loss']:.4f}")
+    print(f"  MBPP Loss: {mbpp_final['mbpp_loss']:.4f}")
+    
     wandb.log({
-        "final_alpaca_loss": alpaca_final['eval_alpaca_loss'],
-        "final_mbpp_loss": mbpp_final['eval_mbpp_loss']
+        "final_combined_loss": combined_final['eval_loss'],
+        "final_alpaca_loss": alpaca_final['alpaca_loss'],
+        "final_mbpp_loss": mbpp_final['mbpp_loss']
     })
 
     # 10. Save the best model
