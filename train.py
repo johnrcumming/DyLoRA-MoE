@@ -12,6 +12,7 @@ from transformers import (
     TrainingArguments,
     DataCollatorForLanguageModeling,
     EarlyStoppingCallback,
+    TrainerCallback,
 )
 from datasets import Dataset, DatasetDict, concatenate_datasets
 from transformers.tokenization_utils_base import BatchEncoding
@@ -20,6 +21,75 @@ from typing import Union, Dict, Iterable, Any
 from dylo_moe.model import DyLoRA_MoE
 from dylo_moe.utils import print_trainable_parameters, save_dylo_moe_state, save_lora_experts
 from data.prepare_data import download_mbpp, download_code_alpaca
+
+
+class GradientMonitoringCallback(TrainerCallback):
+    """
+    Callback to monitor per-expert gradient norms during training.
+    Logs gradient statistics for each expert and the router to wandb.
+    """
+    
+    def __init__(self, model, num_experts: int):
+        self.model = model
+        self.num_experts = num_experts
+        
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        """Called before optimizer.step() - gradients are still available here."""
+        if state.global_step % args.logging_steps == 0:
+            # Compute per-expert gradient norms
+            expert_grad_norms = {f"expert_{i}": 0.0 for i in range(self.num_experts)}
+            router_grad_norm = 0.0
+            total_grad_norm = 0.0
+            lora_total = 0.0
+            
+            for name, param in self.model.named_parameters():
+                if param.grad is not None and param.requires_grad:
+                    grad_norm_sq = param.grad.norm().item() ** 2
+                    total_grad_norm += grad_norm_sq
+                    
+                    # Check if this is a LoRA parameter and which expert it belongs to
+                    if "lora" in name.lower():
+                        lora_total += grad_norm_sq
+                        # Extract expert ID from parameter name
+                        # Names look like: ...lora_A.expert_0.weight or ...lora_B.expert_1.weight
+                        for i in range(self.num_experts):
+                            expert_key = f".expert_{i}"  # Note the dot prefix
+                            if expert_key in name:
+                                expert_grad_norms[f"expert_{i}"] += grad_norm_sq
+                                break
+                    
+                    # Check if this is a router parameter
+                    if "router" in name.lower() or "gate" in name.lower():
+                        router_grad_norm += grad_norm_sq
+            
+            # Compute final norms (square root)
+            total_grad_norm = total_grad_norm ** 0.5
+            router_grad_norm = router_grad_norm ** 0.5
+            lora_total = lora_total ** 0.5
+            for expert_key in expert_grad_norms:
+                expert_grad_norms[expert_key] = expert_grad_norms[expert_key] ** 0.5
+            
+            # Log to wandb
+            log_dict = {
+                "grad_norm/total": total_grad_norm,
+                "grad_norm/router": router_grad_norm,
+                "grad_norm/lora_all": lora_total,
+            }
+            for expert_key, norm in expert_grad_norms.items():
+                log_dict[f"grad_norm/{expert_key}"] = norm
+            
+            # Also log gradient norm ratios for analysis
+            if total_grad_norm > 0:
+                for expert_key, norm in expert_grad_norms.items():
+                    if norm > 0:
+                        log_dict[f"grad_ratio/{expert_key}"] = norm / total_grad_norm
+                if router_grad_norm > 0:
+                    log_dict["grad_ratio/router"] = router_grad_norm / total_grad_norm
+                if lora_total > 0:
+                    log_dict["grad_ratio/lora_all"] = lora_total / total_grad_norm
+            
+            wandb.log(log_dict, step=state.global_step)
+
 
 def preprocess_evaluation_dataset(tokenizer, dataset):
     """
@@ -198,13 +268,19 @@ def main(args):
     # Create the combined training dataset
     train_dataset = preprocess_training_dataset(tokenizer, combined_data, pack=True)
     
+    # Create callbacks
+    callbacks = [
+        EarlyStoppingCallback(early_stopping_patience=3),
+        GradientMonitoringCallback(model, num_experts=model.expert_manager.num_experts),
+    ]
+    
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=combined_eval,  # Use combined dataset for standard evaluation
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        callbacks=callbacks,
     )
 
     # 7. Initial Evaluation (per-domain for analysis)
