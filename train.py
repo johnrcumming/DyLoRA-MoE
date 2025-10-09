@@ -181,6 +181,23 @@ class DyLoRAMonitoringCallback(TrainerCallback):
                     for i in range(self.num_experts):
                         log_dict[f"routing/expert_{i}_token_variance"] = token_variance[i].item()
                     
+                    # 9. Load Balancing Loss Components (if available)
+                    # Log separate LM loss and balance loss for monitoring
+                    if hasattr(self.model, 'last_lm_loss') and self.model.last_lm_loss is not None:
+                        log_dict["loss/lm_loss"] = self.model.last_lm_loss.item()
+                    
+                    if hasattr(self.model, 'last_balance_loss') and self.model.last_balance_loss is not None:
+                        log_dict["loss/balance_loss"] = self.model.last_balance_loss.item()
+                        log_dict["loss/balance_weight"] = self.model.balance_coefficient
+                    
+                    # 10. Routing Confidence Statistics
+                    # Max routing weight indicates confidence in expert selection
+                    max_routing_weights = routing_weights.max(dim=-1)[0]  # [batch, seq_len]
+                    log_dict["routing/confidence_mean"] = max_routing_weights.mean().item()
+                    log_dict["routing/confidence_std"] = max_routing_weights.std().item()
+                    log_dict["routing/confidence_min"] = max_routing_weights.min().item()
+                    log_dict["routing/confidence_max"] = max_routing_weights.max().item()
+                    
                     # Log all metrics to wandb
                     wandb.log(log_dict, step=state.global_step)
                 else:
@@ -251,7 +268,8 @@ def main(args):
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
-        allow_expert_growth=False  # Disable dynamic expert growth for traditional training
+        allow_expert_growth=False,  # Disable dynamic expert growth for traditional training
+        balance_coefficient=args.balance_coefficient  # Load balancing auxiliary loss coefficient
     )
     
     # Mark all experts as mature so router uses sparse delegation from the start
@@ -475,5 +493,6 @@ if __name__ == "__main__":
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA r value.")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha value.")
     parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout value.")
+    parser.add_argument("--balance_coefficient", type=float, default=0.01, help="Coefficient for load balancing auxiliary loss (0 to disable).")
     args = parser.parse_args()
     main(args)

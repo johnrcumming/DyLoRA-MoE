@@ -10,9 +10,10 @@ class DyLoRA_MoE(nn.Module):
     """
     Implements the Dynamic LoRA-based Mixture-of-Experts (DyLoRA-MoE) architecture.
     """
-    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05, token: str | None = None, allow_expert_growth: bool = True):
+    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05, token: str | None = None, allow_expert_growth: bool = True, balance_coefficient: float = 0.01):
         super().__init__()
         self.allow_expert_growth = allow_expert_growth
+        self.balance_coefficient = balance_coefficient  # Coefficient for load balancing auxiliary loss
 
         # 1. Load base model
         self.foundation_model = AutoModelForCausalLM.from_pretrained(
@@ -69,6 +70,8 @@ class DyLoRA_MoE(nn.Module):
         
         # 7. Routing tracking
         self.last_routing_weights = None  # For monitoring routing patterns
+        self.last_lm_loss = None  # Track language modeling loss separately
+        self.last_balance_loss = None  # Track load balancing loss separately
 
         # 8. Device alignment
         self.router.to(self.foundation_model.device)
@@ -135,6 +138,34 @@ class DyLoRA_MoE(nn.Module):
                 return getattr(config, attr)
         
         raise AttributeError(f"Could not find hidden size in {type(config).__name__}")
+
+    def compute_load_balancing_loss(self, routing_weights: torch.Tensor) -> torch.Tensor:
+        """
+        Compute load balancing auxiliary loss to encourage uniform expert usage.
+        
+        This helps prevent routing collapse where one expert dominates and others
+        are underutilized. The loss encourages each expert to handle approximately
+        1/num_experts of the tokens.
+        
+        Args:
+            routing_weights: Routing weights tensor of shape [batch, seq_len, num_experts]
+        
+        Returns:
+            Scalar tensor representing the load balancing loss (MSE from uniform distribution)
+        """
+        # Average routing weights across batch and sequence dimensions
+        # This gives us the average probability of each expert being selected
+        expert_usage = routing_weights.mean(dim=[0, 1])  # [num_experts]
+        
+        # Target: uniform distribution where each expert gets 1/num_experts of the load
+        target = torch.ones_like(expert_usage) / self.router.num_experts
+        
+        # Compute MSE loss between actual usage and uniform target
+        # This penalizes deviation from balanced expert usage
+        balance_loss = torch.nn.functional.mse_loss(expert_usage, target)
+        
+        return balance_loss
+
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None, labels: torch.Tensor | None = None, expert_id: int | None = None):
         """
@@ -230,7 +261,24 @@ class DyLoRA_MoE(nn.Module):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = torch.nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            lm_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            
+            # Add load balancing auxiliary loss during training with multi-expert routing
+            if self.training and self.last_routing_weights is not None and self.balance_coefficient > 0:
+                # Compute load balancing loss to encourage uniform expert usage
+                balance_loss = self.compute_load_balancing_loss(self.last_routing_weights)
+                
+                # Total loss = language modeling loss + weighted load balancing loss
+                loss = lm_loss + self.balance_coefficient * balance_loss
+                
+                # Store individual losses for monitoring (detached to avoid graph issues)
+                self.last_lm_loss = lm_loss.detach()
+                self.last_balance_loss = balance_loss.detach()
+            else:
+                # No load balancing during inference or single-expert mode
+                loss = lm_loss
+                self.last_lm_loss = lm_loss.detach() if lm_loss is not None else None
+                self.last_balance_loss = None
             
         from transformers.modeling_outputs import CausalLMOutputWithPast
         return CausalLMOutputWithPast(

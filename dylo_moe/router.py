@@ -41,10 +41,12 @@ class DynamicHybridRouter(nn.Module):
             top_k_weights, top_k_indices = torch.topk(logits, self.top_k, dim=-1)
             
             # Create a sparse tensor with the top-k weights
+            # Ensure dtype matches for scatter operation (important for mixed precision)
             routing_weights = torch.zeros_like(logits)
             # scatter maintains gradients through the values being scattered
-            routing_weights = routing_weights.scatter(-1, top_k_indices, 
-                                                      F.softmax(top_k_weights, dim=-1))
+            # Explicitly match dtype for scatter operation (fixes mixed precision issues)
+            softmax_weights = F.softmax(top_k_weights, dim=-1).to(routing_weights.dtype)
+            routing_weights = routing_weights.scatter(-1, top_k_indices, softmax_weights)
 
         return routing_weights
 
