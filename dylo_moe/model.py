@@ -66,8 +66,11 @@ class DyLoRA_MoE(nn.Module):
         # 6. Skill library & novelty detector
         self.skill_library = SkillLibrary(embedding_size=hidden_size)
         self.novelty_detector = NoveltyDetector(self.skill_library)
+        
+        # 7. Routing tracking
+        self.last_routing_weights = None  # For monitoring routing patterns
 
-        # 7. Device alignment
+        # 8. Device alignment
         self.router.to(self.foundation_model.device)
         
 
@@ -133,12 +136,20 @@ class DyLoRA_MoE(nn.Module):
         
         raise AttributeError(f"Could not find hidden size in {type(config).__name__}")
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None, labels: torch.Tensor | None = None):
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None, labels: torch.Tensor | None = None, expert_id: int | None = None):
         """
         Forward pass of the DyLoRA-MoE model.
+        
+        Args:
+            input_ids: Input token IDs
+            attention_mask: Attention mask
+            labels: Labels for language modeling loss
+            expert_id: If provided, use this specific expert (for training). 
+                      If None, use routing mechanism (for inference).
         """
-        # For single expert case, use direct approach for efficiency
-        if self.expert_manager.num_experts == 1:
+        # Training mode with explicit expert assignment
+        if expert_id is not None:
+            self.expert_manager.set_active_expert(expert_id)
             outputs = self.foundation_model(
                 input_ids,
                 attention_mask=attention_mask,
@@ -146,57 +157,78 @@ class DyLoRA_MoE(nn.Module):
                 use_cache=False,
             )
             logits = outputs.logits
-        else:
-            # Multi-expert routing approach
-            # Get transformer outputs for routing decisions
-            transformer = self._get_transformer()
-            transformer_outputs = transformer(
+            
+        # Single expert case - direct pass
+        elif self.expert_manager.num_experts == 1:
+            outputs = self.foundation_model(
                 input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
+                use_cache=False,
             )
-            hidden_states = transformer_outputs.hidden_states[-1]
+            logits = outputs.logits
             
-            # Route the input to the appropriate expert(s)
+        # Multi-expert routing (for inference or when expert_id not specified)
+        else:
+            # FIXED: Maintain computational graph through single forward pass
+            # Get full model outputs once (not per expert)
+            outputs = self.foundation_model(
+                input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+            hidden_states = outputs.hidden_states[-1]
+            
+            # Compute routing weights (keep in computational graph)
             routing_weights = self.router(hidden_states)
             
-            # Apply experts and combine outputs
-            expert_logits = []
-            for i in range(self.router.num_experts):
-                self.expert_manager.set_active_expert(i)
-                expert_output = self.foundation_model(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=False,
-                    use_cache=False,
-                )
-                expert_logits.append(expert_output.logits)
-            
-            # Combine expert outputs using routing weights
-            # Average routing weights across sequence length for logit combination
-            expert_weights = routing_weights.mean(dim=1)  # [batch_size, num_experts]
-            
-            logits = torch.zeros_like(expert_logits[0])
-            for i, expert_logit in enumerate(expert_logits):
-                logits += expert_weights[:, i:i+1, None] * expert_logit
-            
-            # Use the last expert's outputs for other attributes
-            outputs = expert_output
-            outputs.logits = logits
+            # During training, we train all experts jointly by using routing weights
+            # as soft assignments. This requires computing outputs for each expert
+            # while maintaining gradients.
+            if self.training:
+                # Compute weighted combination of expert outputs
+                expert_logits_list = []
+                for i in range(self.router.num_experts):
+                    self.expert_manager.set_active_expert(i)
+                    expert_out = self.foundation_model(
+                        input_ids,
+                        attention_mask=attention_mask,
+                        output_hidden_states=False,
+                        use_cache=False,
+                    )
+                    expert_logits_list.append(expert_out.logits)
+                
+                # Stack and weight expert outputs
+                expert_logits_stacked = torch.stack(expert_logits_list, dim=0)  # [num_experts, batch, seq, vocab]
+                expert_weights = routing_weights.mean(dim=1)  # [batch, num_experts] - KEEP GRADIENTS
+                
+                # Weighted combination: [batch, seq, vocab]
+                logits = torch.einsum('ebsv,be->bsv', expert_logits_stacked, expert_weights)
+                
+                # Store routing weights for monitoring AFTER using them (detached copy)
+                self.last_routing_weights = routing_weights.detach()
+            else:
+                # Inference: use the outputs we already computed
+                logits = outputs.logits
+                # Store routing weights for monitoring
+                self.last_routing_weights = routing_weights.detach()
 
+        # Compute loss
         loss = None
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = torch.nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            
         from transformers.modeling_outputs import CausalLMOutputWithPast
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=None,  # strip caches to prevent accelerator padding issues
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
+            hidden_states=outputs.hidden_states if hasattr(outputs, 'hidden_states') else None,
+            attentions=outputs.attentions if hasattr(outputs, 'attentions') else None,
         )
 
     from typing import Optional, Dict, Any
@@ -206,6 +238,17 @@ class DyLoRA_MoE(nn.Module):
         Enables gradient checkpointing for the foundation model.
         """
         self.foundation_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
+
+    def set_training_mode(self, mode: str = "routing"):
+        """
+        Set the training mode for the model.
+        
+        Args:
+            mode: One of "routing" (use router to combine experts), 
+                  "single_expert" (train one expert at a time via expert_id parameter)
+        """
+        self.training_mode = mode
+        print(f"Training mode set to: {mode}")
 
     def add_new_skill(self, skill_data: torch.Tensor | None = None, force: bool = False, batch_size: int = 16, warmup_steps: int = 50):
         """

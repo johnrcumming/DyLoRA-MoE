@@ -26,20 +26,25 @@ class DynamicHybridRouter(nn.Module):
         # Get the routing weights from the gating network
         logits = self.gate(x)
         
+        # Ensure expert_maturity is on the same device as logits
+        if self.expert_maturity.device != logits.device:
+            self.expert_maturity = self.expert_maturity.to(logits.device)
+        
         # The routing strategy depends on the maturity of the experts
-        # If there are new experts, use dense collaboration
-        # The routing strategy depends on the maturity of the experts
-        # If there are new experts, use dense collaboration
-        if torch.any(self.expert_maturity == 0):
+        # If there are new experts or in training mode, use dense collaboration
+        # to ensure gradients flow to all experts and the router
+        if torch.any(self.expert_maturity == 0) or self.training:
             # Dense collaboration: use a softmax over all experts
             routing_weights = F.softmax(logits / self.temperature, dim=-1)
         else:
-            # Sparse delegation: use a top-k routing
+            # Sparse delegation (inference only): use a top-k routing
             top_k_weights, top_k_indices = torch.topk(logits, self.top_k, dim=-1)
             
             # Create a sparse tensor with the top-k weights
             routing_weights = torch.zeros_like(logits)
-            routing_weights.scatter_(-1, top_k_indices, F.softmax(top_k_weights, dim=-1).to(routing_weights.dtype))
+            # scatter maintains gradients through the values being scattered
+            routing_weights = routing_weights.scatter(-1, top_k_indices, 
+                                                      F.softmax(top_k_weights, dim=-1))
 
         return routing_weights
 
