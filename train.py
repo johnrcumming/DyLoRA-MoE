@@ -91,6 +91,106 @@ class GradientMonitoringCallback(TrainerCallback):
             wandb.log(log_dict, step=state.global_step)
 
 
+class DyLoRAMonitoringCallback(TrainerCallback):
+    """
+    Callback to monitor DyLoRA-MoE specific metrics during training.
+    Tracks routing statistics, expert usage patterns, and routing entropy.
+    """
+    
+    def __init__(self, model, num_experts: int):
+        self.model = model
+        self.num_experts = num_experts
+        # Track cumulative expert usage across training
+        self.expert_usage_counts = torch.zeros(num_experts)
+        self.total_routing_steps = 0
+        
+    def on_step_end(self, args, state, control, **kwargs):
+        """Called at the end of each training step to collect routing statistics."""
+        if state.global_step % args.logging_steps == 0:
+            # Get the last routing weights from the model
+            # These are stored during forward pass as [batch, seq_len, num_experts]
+            if hasattr(self.model, 'last_routing_weights') and self.model.last_routing_weights is not None:
+                routing_weights = self.model.last_routing_weights  # [batch, seq_len, num_experts]
+                
+                # Compute statistics over the batch and sequence
+                # Average routing weights across sequence dimension
+                batch_avg_weights = routing_weights.mean(dim=1)  # [batch, num_experts]
+                
+                # 1. Expert Usage Distribution (which experts are being used)
+                # Sum weights across batch to get total usage per expert
+                expert_usage = batch_avg_weights.sum(dim=0)  # [num_experts]
+                total_weight = expert_usage.sum()
+                
+                if total_weight > 0:
+                    expert_usage_normalized = expert_usage / total_weight
+                    
+                    # Log per-expert usage percentages
+                    log_dict = {}
+                    for i in range(self.num_experts):
+                        log_dict[f"routing/expert_{i}_usage"] = expert_usage_normalized[i].item()
+                    
+                    # Update cumulative usage counts
+                    self.expert_usage_counts += expert_usage.cpu()
+                    self.total_routing_steps += 1
+                    
+                    # 2. Routing Entropy (how diverse is the routing?)
+                    # Higher entropy = more balanced expert usage
+                    # Lower entropy = routing concentrated on few experts
+                    probs = expert_usage_normalized.clamp(min=1e-10)  # Avoid log(0)
+                    entropy = -(probs * torch.log(probs)).sum().item()
+                    max_entropy = math.log(self.num_experts)  # Maximum possible entropy
+                    normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
+                    
+                    log_dict["routing/entropy"] = entropy
+                    log_dict["routing/entropy_normalized"] = normalized_entropy
+                    
+                    # 3. Load Balancing Metric
+                    # Coefficient of variation: std/mean
+                    # Lower = more balanced, Higher = more imbalanced
+                    std = expert_usage_normalized.std().item()
+                    mean = expert_usage_normalized.mean().item()
+                    load_balance_cv = std / mean if mean > 0 else 0.0
+                    log_dict["routing/load_imbalance"] = load_balance_cv
+                    
+                    # 4. Expert Dominance (what's the max expert usage?)
+                    max_usage = expert_usage_normalized.max().item()
+                    log_dict["routing/max_expert_usage"] = max_usage
+                    
+                    # 5. Active Experts Count (how many experts have >5% usage)
+                    active_threshold = 0.05
+                    active_experts = (expert_usage_normalized > active_threshold).sum().item()
+                    log_dict["routing/active_experts"] = active_experts
+                    
+                    # 6. Routing Temperature Effect
+                    # Check if routing is becoming more or less confident over time
+                    # Compute the maximum routing weight per token (across experts)
+                    max_weights_per_token = routing_weights.max(dim=-1)[0]  # [batch, seq_len]
+                    avg_max_weight = max_weights_per_token.mean().item()
+                    log_dict["routing/avg_max_confidence"] = avg_max_weight
+                    
+                    # 7. Cumulative Expert Usage Statistics
+                    if self.total_routing_steps > 0:
+                        cumulative_usage = self.expert_usage_counts / self.expert_usage_counts.sum()
+                        for i in range(self.num_experts):
+                            log_dict[f"routing/cumulative_expert_{i}"] = cumulative_usage[i].item()
+                    
+                    # 8. Expert Specialization Indicator
+                    # Compute variance in routing weights across sequence positions
+                    # High variance might indicate experts are specializing for certain positions
+                    token_variance = routing_weights.var(dim=1).mean(dim=0)  # [num_experts]
+                    for i in range(self.num_experts):
+                        log_dict[f"routing/expert_{i}_token_variance"] = token_variance[i].item()
+                    
+                    # Log all metrics to wandb
+                    wandb.log(log_dict, step=state.global_step)
+                else:
+                    # Edge case: no routing weights (shouldn't happen in normal training)
+                    wandb.log({
+                        "routing/warning": 1.0,
+                        "routing/total_weight": 0.0
+                    }, step=state.global_step)
+
+
 def preprocess_evaluation_dataset(tokenizer, dataset):
     """
     Tokenizes the evaluation dataset.
@@ -272,6 +372,7 @@ def main(args):
     callbacks = [
         EarlyStoppingCallback(early_stopping_patience=3),
         GradientMonitoringCallback(model, num_experts=model.expert_manager.num_experts),
+        DyLoRAMonitoringCallback(model, num_experts=model.expert_manager.num_experts),
     ]
     
     trainer = Trainer(

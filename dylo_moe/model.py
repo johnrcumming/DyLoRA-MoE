@@ -187,8 +187,13 @@ class DyLoRA_MoE(nn.Module):
             # as soft assignments. This requires computing outputs for each expert
             # while maintaining gradients.
             if self.training:
-                # Compute weighted combination of expert outputs
-                expert_logits_list = []
+                # Memory-efficient: accumulate weighted expert outputs instead of stacking
+                # Average routing weights across sequence for per-example expert weights
+                expert_weights = routing_weights.mean(dim=1)  # [batch, num_experts] - KEEP GRADIENTS
+                
+                # Initialize accumulated logits
+                logits = None
+                
                 for i in range(self.router.num_experts):
                     self.expert_manager.set_active_expert(i)
                     expert_out = self.foundation_model(
@@ -197,14 +202,19 @@ class DyLoRA_MoE(nn.Module):
                         output_hidden_states=False,
                         use_cache=False,
                     )
-                    expert_logits_list.append(expert_out.logits)
-                
-                # Stack and weight expert outputs
-                expert_logits_stacked = torch.stack(expert_logits_list, dim=0)  # [num_experts, batch, seq, vocab]
-                expert_weights = routing_weights.mean(dim=1)  # [batch, num_experts] - KEEP GRADIENTS
-                
-                # Weighted combination: [batch, seq, vocab]
-                logits = torch.einsum('ebsv,be->bsv', expert_logits_stacked, expert_weights)
+                    
+                    # Weight expert output by routing weight: [batch, seq, vocab]
+                    # expert_weights[:, i] is [batch], unsqueeze to [batch, 1, 1] for broadcasting
+                    weighted_logits = expert_out.logits * expert_weights[:, i].unsqueeze(1).unsqueeze(2)
+                    
+                    # Accumulate (sum) weighted outputs
+                    if logits is None:
+                        logits = weighted_logits
+                    else:
+                        logits = logits + weighted_logits
+                    
+                    # Free memory immediately
+                    del expert_out, weighted_logits
                 
                 # Store routing weights for monitoring AFTER using them (detached copy)
                 self.last_routing_weights = routing_weights.detach()
