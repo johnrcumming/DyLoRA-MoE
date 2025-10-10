@@ -521,6 +521,26 @@ def main(args):
     # Download HumanEval for evaluation only (not used in training)
     humaneval_dataset = download_humaneval()
     
+    # Baseline: Evaluate base model (before LoRA training) on HumanEval
+    print("\n" + "="*80)
+    print("BASELINE EVALUATION: Base Model (Before LoRA Training)")
+    print("="*80)
+    
+    # Evaluate base model's code generation capability
+    baseline_results = evaluate_humaneval(
+        model, tokenizer, humaneval_dataset, max_samples=20  # Use subset for speed
+    )
+    
+    wandb.log({
+        "baseline/humaneval_pass@1": baseline_results['pass@1_approx'],
+        "baseline/humaneval_with_entry_point": baseline_results['num_with_entry_point'],
+        "baseline/num_samples": baseline_results['num_samples'],
+    }, commit=False)
+    
+    print(f"\n✓ Baseline HumanEval Pass@1 (approx): {baseline_results['pass@1_approx']:.2%}")
+    print(f"✓ Baseline generations with entry point: {baseline_results['num_with_entry_point']}/{baseline_results['num_samples']}")
+    print("="*80 + "\n")
+    
     # Prepare training data from each domain
     print("\n--- Preparing Domain-Specific Training Data ---")
     
@@ -555,8 +575,17 @@ def main(args):
         subset_size = int(len(combined_data) * (args.training_subset / 100))
         combined_data = combined_data[:subset_size]
     
-    print(f"\nCombined training dataset size: {len(combined_data)} examples")
-    print(f"HumanEval evaluation set: {len(humaneval_dataset)} examples (for evaluation only)")
+    # Create train/validation split (90/10) from combined data for proper evaluation
+    # HumanEval will be used for benchmarking only, not for per-epoch evaluation
+    train_size = int(len(combined_data) * 0.9)
+    train_data = combined_data[:train_size]
+    val_data = combined_data[train_size:]
+    
+    print(f"\nCombined dataset split:")
+    print(f"  Training: {len(train_data)} examples ({len(train_data)/len(combined_data)*100:.1f}%)")
+    print(f"  Validation: {len(val_data)} examples ({len(val_data)/len(combined_data)*100:.1f}%)")
+    print(f"  HumanEval (benchmark only): {len(humaneval_dataset)} examples")
+
 
 
 
@@ -569,9 +598,9 @@ def main(args):
     training_args = TrainingArguments(
         output_dir="./results_full",
         num_train_epochs=args.num_epochs,
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=4,
-        gradient_accumulation_steps=8,  # Effective batch size = 32
+        per_device_train_batch_size=args.train_batch_size,
+        per_device_eval_batch_size=args.eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,  # Configurable: effective batch size = train_batch_size * gradient_accumulation_steps
         gradient_checkpointing=True,
         learning_rate=5e-5,  # Increased from 2e-5 for faster convergence
         weight_decay=0.01,
@@ -595,36 +624,33 @@ def main(args):
 
     # 6. Instantiate the trainer
     
-    # Use HumanEval for evaluation (standard benchmark)
-    print(f"\n--- Preparing HumanEval Evaluation Dataset ---")
+    # Create training and validation datasets from the split
+    print(f"\n--- Preparing Training and Validation Datasets ---")
+    train_dataset = preprocess_training_dataset(tokenizer, train_data, pack=True)
+    val_dataset = preprocess_evaluation_dataset(tokenizer, Dataset.from_dict({"text": val_data}))
     
-    # Format HumanEval examples for evaluation
+    print(f"Training dataset: {len(train_dataset)} examples")
+    print(f"Validation dataset: {len(val_dataset)} examples")
+    
+    # Prepare HumanEval for benchmarking only (not for per-epoch evaluation)
+    print(f"\n--- Preparing HumanEval Benchmark Dataset ---")
     humaneval_eval_data = []
     for ex in humaneval_dataset:
-        # HumanEval format: prompt + canonical_solution
         prompt = ex.get('prompt', '')
         if prompt:
             humaneval_eval_data.append(prompt)
     
-    # Convert list to Dataset before preprocessing
-    from datasets import Dataset
     humaneval_eval_dataset = Dataset.from_dict({"text": humaneval_eval_data})
+    humaneval_benchmark = preprocess_evaluation_dataset(tokenizer, humaneval_eval_dataset)
     
-    # Preprocess HumanEval for evaluation
-    combined_eval = preprocess_evaluation_dataset(tokenizer, humaneval_eval_dataset)
-    
-    print(f"HumanEval evaluation examples: {len(combined_eval)}")
-    
-    # The trainer will use HumanEval during training for checkpointing and early stopping
-    
-    # Create the combined training dataset
-    train_dataset = preprocess_training_dataset(tokenizer, combined_data, pack=True)
+    print(f"HumanEval benchmark: {len(humaneval_benchmark)} examples")
+
     
     # Create callbacks with updated early stopping parameters
-    # Reduced patience to 2 (from 3) and added threshold of 0.005 for faster convergence
+    # added threshold of 0.005 for faster convergence
     callbacks = [
         EarlyStoppingCallback(
-            early_stopping_patience=2,  # Stop after 2 epochs with no improvement (from 3)
+            early_stopping_patience=3,  # Stop after 2 epochs with no improvement (from 3)
             early_stopping_threshold=0.005  # Minimum improvement threshold for plateau detection
         ),
         GradientMonitoringCallback(model, num_experts=model.expert_manager.num_experts),
@@ -635,15 +661,19 @@ def main(args):
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=combined_eval,  # Uses HumanEval benchmark for evaluation
+        eval_dataset=val_dataset,  # Use validation split for per-epoch evaluation and early stopping
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
         callbacks=callbacks,
     )
 
-    # 7. Initial Evaluation on HumanEval Benchmark
-    print("\n--- Initial Evaluation on HumanEval Benchmark ---")
+    # 7. Initial Evaluation on HumanEval Benchmark (with initialized LoRA, before training)
+    print("\n--- Initial Evaluation on HumanEval Benchmark (With Initialized LoRA) ---")
+    # Temporarily swap to HumanEval for initial benchmark
+    trainer.eval_dataset = humaneval_benchmark
     initial_eval = trainer.evaluate(metric_key_prefix="eval")
-    print(f"Initial HumanEval Loss: {initial_eval['eval_loss']:.4f}")
+    print(f"Initial HumanEval Loss (with LoRA): {initial_eval['eval_loss']:.4f}")
+    # Restore validation dataset for training
+    trainer.eval_dataset = val_dataset
     
     # Evaluate HumanEval code generation (pass@1 approximation)
     initial_humaneval_results = evaluate_humaneval(
@@ -654,15 +684,17 @@ def main(args):
         "initial_humaneval_loss": initial_eval['eval_loss'],
         "initial_humaneval_pass@1": initial_humaneval_results['pass@1_approx'],
         "initial_humaneval_with_entry_point": initial_humaneval_results['num_with_entry_point'],
-    })
+    }, commit=False)
 
     # 8. Train the model on the combined dataset
     print("\n--- Training on Combined Dataset ---")
     print(f"Training with {model.expert_manager.num_experts} experts")
     trainer.train(resume_from_checkpoint=True if args.resume_from_checkpoint else None)
 
-    # 9. Final evaluation on HumanEval Benchmark
+    # 9. Final evaluation on HumanEval Benchmark (after training)
     print("\n--- Final Evaluation on HumanEval Benchmark ---")
+    # Swap to HumanEval for final benchmark
+    trainer.eval_dataset = humaneval_benchmark
     final_eval = trainer.evaluate(metric_key_prefix="eval")
     print(f"Final HumanEval Loss: {final_eval['eval_loss']:.4f}")
     
@@ -675,7 +707,7 @@ def main(args):
         "final_humaneval_loss": final_eval['eval_loss'],
         "final_humaneval_pass@1": final_humaneval_results['pass@1_approx'],
         "final_humaneval_with_entry_point": final_humaneval_results['num_with_entry_point'],
-    })
+    }, commit=False)
 
     # 10. Save the best model
     print("\n--- Saving Best Model ---")
@@ -730,5 +762,8 @@ if __name__ == "__main__":
     parser.add_argument("--balance_coefficient", type=float, default=0.01, help="Coefficient for load balancing auxiliary loss (0 to disable).")
     parser.add_argument("--interleaved_sampling", action="store_true", help="Use interleaved sampling for balanced dataset representation (50/50 Code Alpaca and MBPP).")
     parser.add_argument("--cosine_restarts", action="store_true", help="Use cosine_with_restarts learning rate scheduler with 2 cycles for better exploration.")
+    parser.add_argument("--train_batch_size", type=int, default=4, help="Per-device training batch size.")
+    parser.add_argument("--eval_batch_size", type=int, default=4, help="Per-device evaluation batch size.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Number of gradient accumulation steps (effective batch size = train_batch_size * gradient_accumulation_steps).")
     args = parser.parse_args()
     main(args)

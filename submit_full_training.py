@@ -32,10 +32,10 @@ if not hf_token:
 worker_pool_specs = [
     {
         "machine_spec": {
-            "machine_type": "a2-highgpu-1g",
-            "accelerator_type": "NVIDIA_TESLA_A100",
-            #"machine_type": "a3-highgpu-1g",
-            #"accelerator_type": "NVIDIA_H100_80GB",
+            #"machine_type": "a2-highgpu-1g",
+            #"accelerator_type": "NVIDIA_TESLA_A100",
+            "machine_type": "a3-highgpu-1g",
+            "accelerator_type": "NVIDIA_H100_80GB",
             "accelerator_count": 1,
         },
         "replica_count": 1,
@@ -45,7 +45,17 @@ worker_pool_specs = [
         },
         "container_spec": {
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
-            "command": ["python", "train.py", "--bf16", "--num_experts", "4"],
+            "command": [
+                "python", "train.py", 
+                "--bf16", 
+                "--num_experts", "4",
+                "--interleaved_sampling",  # Phase 1: Enable 50/50 balanced sampling
+                "--balance_coefficient", "0.01",  # Phase 1: Load balancing loss
+                "--cosine_restarts",  # Phase 1: LR scheduler with restarts
+                "--train_batch_size", "16",  # Per-device training batch size
+                "--eval_batch_size", "8",  # Per-device evaluation batch size
+                "--gradient_accumulation_steps", "4",  # Effective batch size = 16 * 4 = 64
+            ],
             "args": [],
             "env": [
                 {"name": "WANDB_API_KEY", "value": wandb_api_key},
