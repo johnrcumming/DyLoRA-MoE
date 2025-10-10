@@ -367,3 +367,69 @@ class DyLoRA_MoE(nn.Module):
             self.router.expert_maturity = self.router.expert_maturity.to(self.foundation_model.device)
         
         return is_novel
+
+    def generate(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None, **generate_kwargs):
+        """
+        Generate text using DyLoRA-MoE with dynamic expert selection.
+        
+        For generation, we use the router to select the best expert based on the input,
+        then generate with that expert active.
+        
+        Args:
+            input_ids: Input token IDs [batch, seq_len]
+            attention_mask: Attention mask [batch, seq_len]
+            **generate_kwargs: Additional arguments passed to model.generate()
+        
+        Returns:
+            Generated token IDs
+        """
+        # Set to eval mode for generation
+        was_training = self.training
+        self.eval()
+        
+        with torch.no_grad():
+            # Single expert case - just use that expert
+            if self.expert_manager.num_experts == 1:
+                self.expert_manager.set_active_expert(0)
+                outputs = self.foundation_model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    **generate_kwargs
+                )
+            else:
+                # Multi-expert: use router to select best expert
+                # Get hidden states from a forward pass
+                forward_outputs = self.foundation_model(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                    use_cache=False,
+                )
+                hidden_states = forward_outputs.hidden_states[-1]
+                
+                # Get routing weights and select the expert with highest average weight
+                routing_weights = self.router(hidden_states)  # [batch, seq, num_experts]
+                
+                # Average routing weights across sequence to get per-batch expert preference
+                batch_expert_weights = routing_weights.mean(dim=1)  # [batch, num_experts]
+                
+                # Select the expert with highest weight for each batch element
+                selected_experts = batch_expert_weights.argmax(dim=1)  # [batch]
+                
+                # For simplicity in generation, use the most common expert across the batch
+                # (In a more sophisticated implementation, we could generate separately per batch element)
+                expert_id = selected_experts.mode().values.item()
+                
+                # Activate the selected expert and generate
+                self.expert_manager.set_active_expert(expert_id)
+                outputs = self.foundation_model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    **generate_kwargs
+                )
+        
+        # Restore training mode
+        if was_training:
+            self.train()
+        
+        return outputs
