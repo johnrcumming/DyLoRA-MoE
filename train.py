@@ -611,7 +611,7 @@ def main(args):
         per_device_train_batch_size=args.train_batch_size,
         per_device_eval_batch_size=args.eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,  # Configurable: effective batch size = train_batch_size * gradient_accumulation_steps
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,  # DISABLED: Breaks gradient flow with multi-expert routing
         learning_rate=5e-5,  # Increased from 2e-5 for faster convergence
         weight_decay=0.01,
         warmup_ratio=0.1,
