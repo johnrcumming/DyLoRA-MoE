@@ -214,46 +214,40 @@ class DyLoRA_MoE(nn.Module):
             # Compute routing weights (keep in computational graph)
             routing_weights = self.router(hidden_states)
             
-            # During training, we train all experts jointly by using routing weights
-            # as soft assignments. This requires computing outputs for each expert
-            # while maintaining gradients.
-            if self.training:
-                # Memory-efficient: accumulate weighted expert outputs instead of stacking
-                # Average routing weights across sequence for per-example expert weights
-                expert_weights = routing_weights.mean(dim=1)  # [batch, num_experts] - KEEP GRADIENTS
+            # Both training and evaluation need to combine experts via routing
+            # The only difference is whether we need gradients (training) or not (eval)
+            
+            # Memory-efficient: accumulate weighted expert outputs instead of stacking
+            # Average routing weights across sequence for per-example expert weights
+            expert_weights = routing_weights.mean(dim=1)  # [batch, num_experts]
+            
+            # Initialize accumulated logits
+            logits = None
+            
+            for i in range(self.router.num_experts):
+                self.expert_manager.set_active_expert(i)
+                expert_out = self.foundation_model(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=False,
+                    use_cache=False,
+                )
                 
-                # Initialize accumulated logits
-                logits = None
+                # Weight expert output by routing weight: [batch, seq, vocab]
+                # expert_weights[:, i] is [batch], unsqueeze to [batch, 1, 1] for broadcasting
+                weighted_logits = expert_out.logits * expert_weights[:, i].unsqueeze(1).unsqueeze(2)
                 
-                for i in range(self.router.num_experts):
-                    self.expert_manager.set_active_expert(i)
-                    expert_out = self.foundation_model(
-                        input_ids,
-                        attention_mask=attention_mask,
-                        output_hidden_states=False,
-                        use_cache=False,
-                    )
-                    
-                    # Weight expert output by routing weight: [batch, seq, vocab]
-                    # expert_weights[:, i] is [batch], unsqueeze to [batch, 1, 1] for broadcasting
-                    weighted_logits = expert_out.logits * expert_weights[:, i].unsqueeze(1).unsqueeze(2)
-                    
-                    # Accumulate (sum) weighted outputs
-                    if logits is None:
-                        logits = weighted_logits
-                    else:
-                        logits = logits + weighted_logits
-                    
-                    # Free memory immediately
-                    del expert_out, weighted_logits
+                # Accumulate (sum) weighted outputs
+                if logits is None:
+                    logits = weighted_logits
+                else:
+                    logits = logits + weighted_logits
                 
-                # Store routing weights for monitoring AFTER using them (detached copy)
-                self.last_routing_weights = routing_weights.detach()
-            else:
-                # Inference: use the outputs we already computed
-                logits = outputs.logits
-                # Store routing weights for monitoring
-                self.last_routing_weights = routing_weights.detach()
+                # Free memory immediately
+                del expert_out, weighted_logits
+            
+            # Store routing weights for monitoring (detached copy)
+            self.last_routing_weights = routing_weights.detach()
 
         # Compute loss
         loss = None

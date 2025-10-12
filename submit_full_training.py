@@ -53,9 +53,9 @@ worker_pool_specs = [
                 "--interleaved_sampling",  # Phase 1: Enable 50/50 balanced sampling
                 "--balance_coefficient", "0.01",  # Phase 1: Load balancing loss
                 "--cosine_restarts",  # Phase 1: LR scheduler with restarts
-                "--train_batch_size", "8",  # Per-device training batch size
-                "--eval_batch_size", "8",  # Per-device evaluation batch size
-                "--gradient_accumulation_steps", "8",  # Effective batch size = 8 * 8 = 64
+                "--train_batch_size", "2",  # REDUCED: Prevent OOM with multi-expert forward passes
+                "--eval_batch_size", "4",  # Smaller eval batch
+                "--gradient_accumulation_steps", "32",  # Maintain effective batch size = 2 * 32 = 64
                 "--disable_early_stopping",  # Uncomment to disable early stopping and train for all epochs
             ],
             "args": [],
