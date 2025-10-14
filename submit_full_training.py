@@ -48,15 +48,18 @@ worker_pool_specs = [
             "command": [
                 "python", "train.py", 
                 "--bf16", 
-                "--num_epochs", "20",
+                "--num_epochs", "10",
                 "--num_experts", "4",
+                "--eval_strategy", "epoch",  # Evaluate at end of each epoch
                 "--interleaved_sampling",  # Phase 1: Enable 50/50 balanced sampling
                 "--balance_coefficient", "0.01",  # Phase 1: Load balancing loss
                 "--cosine_restarts",  # Phase 1: LR scheduler with restarts
                 "--train_batch_size", "2",  # REDUCED: Prevent OOM with multi-expert forward passes
                 "--eval_batch_size", "4",  # Smaller eval batch
                 "--gradient_accumulation_steps", "32",  # Maintain effective batch size = 2 * 32 = 64
-                "--disable_early_stopping",  # Uncomment to disable early stopping and train for all epochs
+                #"--disable_early_stopping",  # Uncomment to disable early stopping and train for all epochs
+                "--early_stopping_patience", "3",  # Early stopping patience
+
             ],
             "args": [],
             "env": [
