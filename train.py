@@ -666,10 +666,10 @@ def main(args):
     # Conditionally add early stopping callback
     if not args.disable_early_stopping:
         callbacks.insert(0, EarlyStoppingCallback(
-            early_stopping_patience=3,  # Stop after 3 epochs with no improvement
+            early_stopping_patience=args.early_stopping_patience,
             early_stopping_threshold=0.005  # Minimum improvement threshold for plateau detection
         ))
-        print("✓ Early stopping enabled (patience=3, threshold=0.005)")
+        print(f"✓ Early stopping enabled (patience={args.early_stopping_patience}, threshold=0.005)")
     else:
         print("ℹ Early stopping disabled - will train for all epochs")
     
@@ -782,5 +782,6 @@ if __name__ == "__main__":
     parser.add_argument("--eval_batch_size", type=int, default=4, help="Per-device evaluation batch size.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Number of gradient accumulation steps (effective batch size = train_batch_size * gradient_accumulation_steps).")
     parser.add_argument("--disable_early_stopping", action="store_true", help="Disable early stopping and train for all epochs.")
+    parser.add_argument("--early_stopping_patience", type=int, default=3, help="Number of epochs with no improvement before stopping (only applies if early stopping is enabled).")
     args = parser.parse_args()
     main(args)
