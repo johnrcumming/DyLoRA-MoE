@@ -50,7 +50,6 @@ worker_pool_specs = [
                 "--bf16", 
                 "--num_epochs", "10",
                 "--num_experts", "4",
-                "--eval_strategy", "epoch",  # Evaluate at end of each epoch
                 "--interleaved_sampling",  # Phase 1: Enable 50/50 balanced sampling
                 "--balance_coefficient", "0.01",  # Phase 1: Load balancing loss
                 "--cosine_restarts",  # Phase 1: LR scheduler with restarts
