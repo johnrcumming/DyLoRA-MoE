@@ -32,10 +32,10 @@ if not hf_token:
 worker_pool_specs = [
     {
         "machine_spec": {
-            "machine_type": "a2-highgpu-1g",
-            "accelerator_type": "NVIDIA_TESLA_A100",
-            #"machine_type": "a3-highgpu-1g",
-            #"accelerator_type": "NVIDIA_H100_80GB",
+            #"machine_type": "a2-highgpu-1g",
+            #"accelerator_type": "NVIDIA_TESLA_A100",
+            "machine_type": "a3-highgpu-1g",
+            "accelerator_type": "NVIDIA_H100_80GB",
             "accelerator_count": 1,
         },
         "replica_count": 1,
@@ -46,19 +46,17 @@ worker_pool_specs = [
         "container_spec": {
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
             "command": [
-                "python", "train.py", 
+                "python", "train.py",
+                "--datasets", "code_alpaca,mbpp,evol_instruct,code_feedback",  # Large-scale: ~230k examples
                 "--bf16", 
                 "--num_epochs", "10",
-                "--num_experts", "4",
-                "--interleaved_sampling",  # Phase 1: Enable 50/50 balanced sampling
-                "--balance_coefficient", "0.01",  # Phase 1: Load balancing loss
-                "--cosine_restarts",  # Phase 1: LR scheduler with restarts
-                "--train_batch_size", "1",  # REDUCED: Prevent OOM with multi-expert forward passes
-                "--eval_batch_size", "4",  # Smaller eval batch
-                "--gradient_accumulation_steps", "64",  # Maintain effective batch size = 1 * 32 = 32
-                #"--disable_early_stopping",  # Uncomment to disable early stopping and train for all epochs
-                "--early_stopping_patience", "3",  # Early stopping patience
-                "--datasets", "code_alpaca,mbpp,evol_instruct,code_feedback" # Use multiple datasets
+                "--num_experts", "2",
+                "--balance_coefficient", "0.01",  # Load balancing loss
+                "--cosine_restarts",  # LR scheduler with restarts
+                "--train_batch_size", "4",  # Minimal for large dataset + multi-expert forward
+                "--eval_batch_size", "2",  # Reduced eval batch to save memory
+                "--gradient_accumulation_steps", "64",  # Large accumulation: effective batch = 128
+                "--early_stopping_patience", "3",
             ],
             "args": [],
             "env": [
