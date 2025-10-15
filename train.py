@@ -23,7 +23,9 @@ from dylo_moe.utils import print_trainable_parameters, save_dylo_moe_state, save
 from data.prepare_data import (
     download_mbpp, 
     download_code_alpaca,
-    download_humaneval
+    download_humaneval,
+    get_dataset,
+    AVAILABLE_DATASETS,
 )
 
 
@@ -506,20 +508,46 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
     
-    # 4. Load datasets - Simplified Configuration (2 domains + HumanEval)
-    # NOTE: APPS and CodeSearchNet are deprecated (dataset scripts no longer supported)
-    # See DATASET_UPDATE_STATUS.md for details
-    # Domain 1: General instruction following (Code Alpaca)
-    # Domain 2: Basic programming problems (MBPP)
-    # Benchmark: HumanEval (evaluation only)
+    # 4. Load datasets based on --datasets argument
+    # Default: code_alpaca,mbpp
+    # Available: code_alpaca, mbpp, evol_instruct, code_feedback, python_codes_25k, 
+    #            python_code_instructions_18k, python_code_23k_sharegpt
     
-    print("\n--- Loading Datasets (Simplified: 2 Domains + HumanEval) ---")
+    dataset_names = args.datasets.split(',')
+    print(f"\n--- Loading Datasets: {', '.join(dataset_names)} ---")
+    print(f"Available datasets: {', '.join(AVAILABLE_DATASETS.keys())}")
     
-    code_alpaca_dataset = download_code_alpaca(filter_python=False, with_validation=True)
-    mbpp_dataset = download_mbpp(with_validation=True)
+    # Load each dataset
+    loaded_datasets = []
+    for dataset_name in dataset_names:
+        dataset_name = dataset_name.strip()
+        if dataset_name == 'humaneval':
+            print(f"⚠️  Skipping {dataset_name} (evaluation only, not for training)")
+            continue
+        if dataset_name not in AVAILABLE_DATASETS:
+            print(f"⚠️  Unknown dataset: {dataset_name}. Skipping.")
+            continue
+        try:
+            dataset = get_dataset(dataset_name, with_validation=True)
+            loaded_datasets.append((dataset_name, dataset))
+            print(f"✓ Loaded {dataset_name}: {len(dataset['train'])} train, {len(dataset['validation'])} val")
+        except Exception as e:
+            print(f"⚠️  Error loading {dataset_name}: {e}")
+    
+    if not loaded_datasets:
+        raise ValueError("No datasets were successfully loaded. Please check --datasets argument.")
     
     # Download HumanEval for evaluation only (not used in training)
     humaneval_dataset = download_humaneval()
+    
+    # For backwards compatibility, assign first two datasets as primary datasets
+    # (used in interleaved sampling if enabled)
+    if len(loaded_datasets) >= 1:
+        primary_dataset_name, primary_dataset = loaded_datasets[0]
+        code_alpaca_dataset = primary_dataset  # For backwards compatibility
+    if len(loaded_datasets) >= 2:
+        secondary_dataset_name, secondary_dataset = loaded_datasets[1]
+        mbpp_dataset = secondary_dataset  # For backwards compatibility
     
     # Move model to GPU if available (needed for baseline evaluation)
     if torch.cuda.is_available():
@@ -538,7 +566,7 @@ def main(args):
     
     # Evaluate base model's code generation capability
     baseline_results = evaluate_humaneval(
-        model, tokenizer, humaneval_dataset, max_samples=20  # Use subset for speed
+        model, tokenizer, humaneval_dataset
     )
     
     wandb.log({
@@ -551,35 +579,74 @@ def main(args):
     print(f"✓ Baseline generations with entry point: {baseline_results['num_with_entry_point']}/{baseline_results['num_samples']}")
     print("="*80 + "\n")
     
-    # Prepare training data from each domain
-    print("\n--- Preparing Domain-Specific Training Data ---")
+    # Prepare training data from loaded datasets
+    print("\n--- Preparing Training Data from Loaded Datasets ---")
     
-    # Domain 1: Code Alpaca (instruction following)
-    skill1_data = [ex['instruction'] + "\n" + ex['output'] for ex in code_alpaca_dataset['train']]
-    print(f"Domain 1 (Code Alpaca - Instructions): {len(skill1_data)} examples")
+    # Extract text from each dataset based on their schema
+    def extract_text_from_dataset(dataset_name: str, dataset_dict):
+        """Extract training text from dataset based on its schema."""
+        train_data = []
+        dataset = dataset_dict['train']
+        
+        # Get first example to inspect schema
+        first_example = dataset[0]
+        
+        # Handle different dataset formats
+        if 'instruction' in first_example and 'output' in first_example:
+            # Alpaca-style format (code_alpaca, evol_instruct, python_code_instructions_18k, python_codes_25k)
+            for ex in dataset:
+                text = ex['instruction']
+                if ex.get('input'):  # Some datasets have input field
+                    text += "\n" + ex['input']
+                text += "\n" + ex['output']
+                train_data.append(text)
+        elif 'query' in first_example and 'answer' in first_example:
+            # CodeFeedback format
+            for ex in dataset:
+                train_data.append(ex['query'] + "\n" + ex['answer'])
+        elif 'conversations' in first_example:
+            # ShareGPT format (python_code_23k_sharegpt)
+            for ex in dataset:
+                # Concatenate conversation turns
+                text = "\n".join([turn.get('value', '') for turn in ex['conversations']])
+                train_data.append(text)
+        elif 'text' in first_example:
+            # MBPP format or simple text format
+            train_data = [ex['text'] for ex in dataset]
+        else:
+            raise ValueError(f"Unknown dataset format for {dataset_name}. Fields: {list(first_example.keys())}")
+        
+        return train_data
     
-    # Domain 2: MBPP (basic problems)
-    skill2_data = [ex['text'] for ex in mbpp_dataset['train']]
-    print(f"Domain 2 (MBPP - Basic Problems): {len(skill2_data)} examples")
-    
-    # Combine datasets
-    print(f"\nTotal training examples before combining: {len(skill1_data) + len(skill2_data)}")
+    # Process all loaded datasets
+    all_dataset_data = []
+    for dataset_name, dataset_dict in loaded_datasets:
+        data = extract_text_from_dataset(dataset_name, dataset_dict)
+        all_dataset_data.append((dataset_name, data))
+        print(f"✓ {dataset_name}: {len(data)} examples")
     
     # Choose sampling strategy based on CLI flag
-    if args.interleaved_sampling:
+    if args.interleaved_sampling and len(all_dataset_data) == 2:
         print("\n--- Using Interleaved Sampling (Equal 50/50 representation) ---")
-        # Use interleaved sampling for equal representation
-        combined_data = create_interleaved_dataset(
-            skill1_data, skill2_data
-        )
-        
-        print(f"\nDomain representation: ~50% Code Alpaca, ~50% MBPP (balanced)")
+        # Use interleaved sampling for equal representation (works with 2 datasets)
+        skill1_name, skill1_data = all_dataset_data[0]
+        skill2_name, skill2_data = all_dataset_data[1]
+        combined_data = create_interleaved_dataset(skill1_data, skill2_data)
+        print(f"Domain representation: ~50% {skill1_name}, ~50% {skill2_name} (balanced)")
     else:
         print("\n--- Using Concatenation (dataset size based) ---")
-        combined_data = skill1_data + skill2_data
+        # Concatenate all datasets
+        combined_data = []
+        for dataset_name, data in all_dataset_data:
+            combined_data.extend(data)
+        
+        # Print distribution
         total = len(combined_data)
-        print(f"Code Alpaca: {len(skill1_data)} ({len(skill1_data)/total*100:.1f}%)")
-        print(f"MBPP: {len(skill2_data)} ({len(skill2_data)/total*100:.1f}%)")
+        print("Dataset distribution:")
+        for dataset_name, data in all_dataset_data:
+            print(f"  {dataset_name}: {len(data)} ({len(data)/total*100:.1f}%)")
+    
+    print(f"\nTotal training examples: {len(combined_data)}")
     
     if args.training_subset:
         subset_size = int(len(combined_data) * (args.training_subset / 100))
@@ -682,32 +749,12 @@ def main(args):
         callbacks=callbacks,
     )
 
-    # 7. Initial Evaluation on HumanEval Benchmark (with initialized LoRA, before training)
-    print("\n--- Initial Evaluation on HumanEval Benchmark (With Initialized LoRA) ---")
-    # Temporarily swap to HumanEval for initial benchmark
-    trainer.eval_dataset = humaneval_benchmark
-    initial_eval = trainer.evaluate(metric_key_prefix="eval")
-    print(f"Initial HumanEval Loss (with LoRA): {initial_eval['eval_loss']:.4f}")
-    # Restore validation dataset for training
-    trainer.eval_dataset = val_dataset
-    
-    # Evaluate HumanEval code generation (pass@1 approximation)
-    initial_humaneval_results = evaluate_humaneval(
-        model, tokenizer, humaneval_dataset, max_samples=20  # Use subset for speed
-    )
-    
-    wandb.log({
-        "initial_humaneval_loss": initial_eval['eval_loss'],
-        "initial_humaneval_pass@1": initial_humaneval_results['pass@1_approx'],
-        "initial_humaneval_with_entry_point": initial_humaneval_results['num_with_entry_point'],
-    }, commit=False)
-
-    # 8. Train the model on the combined dataset
+    # 7. Train the model on the combined dataset
     print("\n--- Training on Combined Dataset ---")
     print(f"Training with {model.expert_manager.num_experts} experts")
     trainer.train(resume_from_checkpoint=True if args.resume_from_checkpoint else None)
 
-    # 9. Final evaluation on HumanEval Benchmark (after training)
+    # 8. Final evaluation on HumanEval Benchmark (after training)
     print("\n--- Final Evaluation on HumanEval Benchmark ---")
     # Swap to HumanEval for final benchmark
     trainer.eval_dataset = humaneval_benchmark
@@ -725,13 +772,13 @@ def main(args):
         "final_humaneval_with_entry_point": final_humaneval_results['num_with_entry_point'],
     }, commit=False)
 
-    # 10. Save the best model
+    # 9. Save the best model
     print("\n--- Saving Best Model ---")
     trainer.save_model("./results_full/best_model")
     tokenizer.save_pretrained("./results_full/best_model")
     print("Best model saved to ./results_full/best_model")
 
-    # 10. Save the best model, trainer state, and DyLoRA-MoE state
+    # 9. Save the best model, trainer state, and DyLoRA-MoE state
     print("--- Saving Best Model and Full State ---")
     best_model_dir = "./results_full/best_model"
     
@@ -747,7 +794,7 @@ def main(args):
     save_dylo_moe_state(model, dylo_moe_state_dir)
     print(f"DyLoRA-MoE state saved to {dylo_moe_state_dir}")
 
-    # 11. Upload the entire output directory as a wandb artifact
+    # 10. Upload the entire output directory as a wandb artifact
     print("--- Uploading Artifacts to W&B ---")
     artifact = wandb.Artifact('best-dylora-model-full', type='model')
     artifact.add_dir(training_args.output_dir)
@@ -783,5 +830,14 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Number of gradient accumulation steps (effective batch size = train_batch_size * gradient_accumulation_steps).")
     parser.add_argument("--disable_early_stopping", action="store_true", help="Disable early stopping and train for all epochs.")
     parser.add_argument("--early_stopping_patience", type=int, default=3, help="Number of epochs with no improvement before stopping (only applies if early stopping is enabled).")
+    parser.add_argument(
+        "--datasets", 
+        type=str, 
+        default="code_alpaca,mbpp", 
+        help="Comma-separated list of datasets to use for training. "
+             "Available: code_alpaca, mbpp, evol_instruct, code_feedback, python_codes_25k, "
+             "python_code_instructions_18k, python_code_23k_sharegpt. "
+             "Example: --datasets 'code_alpaca,mbpp,evol_instruct'"
+    )
     args = parser.parse_args()
     main(args)

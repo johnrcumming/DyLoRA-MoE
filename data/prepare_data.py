@@ -136,6 +136,91 @@ def download_codesearchnet_python(max_samples=50000, with_validation=True):
     return dataset
 
 
+def download_evol_instruct(with_validation=True):
+    """
+    Downloads Evol-Instruct-Code-80k - High-quality evolved code instructions.
+    80k examples, 4x larger than CodeAlpaca with improved quality.
+    """
+    print("Downloading Evol-Instruct-Code-80k...")
+    dataset = load_dataset("nickrosh/Evol-Instruct-Code-80k-v1", split="train")
+    
+    if with_validation:
+        split_dataset = dataset.train_test_split(test_size=0.1, seed=42)
+        dataset = DatasetDict({
+            'train': split_dataset['train'],
+            'validation': split_dataset['test']
+        })
+    return dataset
+
+
+def download_code_feedback(with_validation=True):
+    """
+    Downloads CodeFeedback-Filtered-Instruction - High-quality code instructions with feedback.
+    Multi-language support with quality filtering.
+    """
+    print("Downloading CodeFeedback-Filtered-Instruction...")
+    dataset = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction", split="train")
+    
+    if with_validation:
+        split_dataset = dataset.train_test_split(test_size=0.1, seed=42)
+        dataset = DatasetDict({
+            'train': split_dataset['train'],
+            'validation': split_dataset['test']
+        })
+    return dataset
+
+
+def download_python_codes_25k(with_validation=True):
+    """
+    Downloads Python-Codes-25k - 25k Python code examples.
+    Good for Python-focused training.
+    """
+    print("Downloading Python-Codes-25k...")
+    dataset = load_dataset("flytech/python-codes-25k", split="train")
+    
+    if with_validation:
+        split_dataset = dataset.train_test_split(test_size=0.1, seed=42)
+        dataset = DatasetDict({
+            'train': split_dataset['train'],
+            'validation': split_dataset['test']
+        })
+    return dataset
+
+
+def download_python_code_instructions_18k(with_validation=True):
+    """
+    Downloads Python-Code-Instructions-18k - Python code instructions in Alpaca format.
+    Compatible with CodeAlpaca format.
+    """
+    print("Downloading Python-Code-Instructions-18k...")
+    dataset = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train")
+    
+    if with_validation:
+        split_dataset = dataset.train_test_split(test_size=0.1, seed=42)
+        dataset = DatasetDict({
+            'train': split_dataset['train'],
+            'validation': split_dataset['test']
+        })
+    return dataset
+
+
+def download_python_code_23k_sharegpt(with_validation=True):
+    """
+    Downloads Python-Code-23k-ShareGPT - Python code conversations in ChatGPT style.
+    Good for conversational code generation.
+    """
+    print("Downloading Python-Code-23k-ShareGPT...")
+    dataset = load_dataset("ajibawa-2023/Python-Code-23k-ShareGPT", split="train")
+    
+    if with_validation:
+        split_dataset = dataset.train_test_split(test_size=0.1, seed=42)
+        dataset = DatasetDict({
+            'train': split_dataset['train'],
+            'validation': split_dataset['test']
+        })
+    return dataset
+
+
 def download_humaneval():
     """
     Downloads HumanEval - OpenAI's code generation benchmark.
@@ -144,6 +229,46 @@ def download_humaneval():
     print("Downloading HumanEval...")
     dataset = load_dataset("openai_humaneval", split="test")
     return dataset
+
+
+# Dataset registry for easy access
+AVAILABLE_DATASETS = {
+    'code_alpaca': download_code_alpaca,
+    'mbpp': download_mbpp,
+    'evol_instruct': download_evol_instruct,
+    'code_feedback': download_code_feedback,
+    'python_codes_25k': download_python_codes_25k,
+    'python_code_instructions_18k': download_python_code_instructions_18k,
+    'python_code_23k_sharegpt': download_python_code_23k_sharegpt,
+    'apps': download_apps,
+    'humaneval': download_humaneval,  # Evaluation only
+}
+
+
+def get_dataset(dataset_name: str, with_validation: bool = True):
+    """
+    Get a dataset by name from the registry.
+    
+    Args:
+        dataset_name: Name of the dataset (see AVAILABLE_DATASETS)
+        with_validation: Whether to create train/validation split
+    
+    Returns:
+        Dataset or DatasetDict
+    """
+    if dataset_name not in AVAILABLE_DATASETS:
+        raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(AVAILABLE_DATASETS.keys())}")
+    
+    download_func = AVAILABLE_DATASETS[dataset_name]
+    
+    # Check if function accepts with_validation parameter
+    import inspect
+    sig = inspect.signature(download_func)
+    if 'with_validation' in sig.parameters:
+        return download_func(with_validation=with_validation)
+    else:
+        return download_func()
+
 
 if __name__ == "__main__":
     download_the_stack()

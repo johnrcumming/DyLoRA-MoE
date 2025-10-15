@@ -73,6 +73,19 @@ python train.py \
   --bf16 \
   --num_epochs 10
 
+# Use custom datasets (80k Evol-Instruct + MBPP)
+python train.py \
+  --datasets "evol_instruct,mbpp" \
+  --bf16 \
+  --num_epochs 10
+
+# Large-scale training with multiple datasets (~180k examples)
+python train.py \
+  --datasets "code_alpaca,evol_instruct,code_feedback,mbpp" \
+  --bf16 \
+  --num_epochs 10 \
+  --balance_coefficient 0.01
+
 # Quick test with data subset
 python train.py \
   --training_subset 10 \
@@ -80,6 +93,19 @@ python train.py \
   --bf16 \
   --num_epochs 3
 ```
+
+#### Available Datasets
+
+See [DATASETS.md](DATASETS.md) for complete dataset documentation.
+
+Available datasets (use with `--datasets "dataset1,dataset2,..."`):
+- `code_alpaca`: 20k multilingual code instructions (default)
+- `mbpp`: 1k Python programming problems (default)
+- `evol_instruct`: 80k high-quality evolved code instructions ⭐
+- `code_feedback`: Filtered code instructions with multi-language support ⭐
+- `python_codes_25k`: 25k Python code examples
+- `python_code_instructions_18k`: 18k Python instructions (Alpaca format)
+- `python_code_23k_sharegpt`: 23k Python conversations (ChatGPT style)
 
 #### Available Arguments
 
@@ -93,6 +119,9 @@ python train.py \
 - `--bf16`: Use BF16 mixed precision (recommended)
 - `--fp16`: Use FP16 mixed precision
 - `--resume_from_checkpoint`: Resume from latest checkpoint
+- `--datasets`: Comma-separated list of datasets (default: "code_alpaca,mbpp")
+- `--interleaved_sampling`: Use 50/50 balanced sampling (works with 2 datasets)
+- `--balance_coefficient`: Load balancing loss coefficient (default: 0.01)
 
 ### Vertex AI Training
 
