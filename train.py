@@ -449,7 +449,21 @@ def main(args):
     # 1. Initialize wandb
     wandb.init(project="dylo-moe-full-training")
 
-    # 2. Instantiate the model
+    # 2. Download checkpoint from W&B if resuming
+    checkpoint_path = None
+    if args.wandb_checkpoint_artifact:
+        print(f"\n--- Downloading checkpoint from W&B artifact: {args.wandb_checkpoint_artifact} ---")
+        try:
+            artifact = wandb.use_artifact(args.wandb_checkpoint_artifact, type='model')
+            artifact_dir = artifact.download()
+            checkpoint_path = artifact_dir
+            print(f"✓ Checkpoint downloaded to: {checkpoint_path}")
+        except Exception as e:
+            print(f"❌ Failed to download W&B artifact: {e}")
+            print("Proceeding without checkpoint...")
+            checkpoint_path = None
+
+    # 3. Instantiate the model
     hf_token = os.environ.get("HF_TOKEN")
     model = DyLoRA_MoE(
         args.model_name,
@@ -752,7 +766,15 @@ def main(args):
     # 7. Train the model on the combined dataset
     print("\n--- Training on Combined Dataset ---")
     print(f"Training with {model.expert_manager.num_experts} experts")
-    trainer.train(resume_from_checkpoint=True if args.resume_from_checkpoint else None)
+    
+    # Use W&B checkpoint if downloaded, otherwise use legacy resume flag
+    resume_checkpoint = checkpoint_path if checkpoint_path else (True if args.resume_from_checkpoint else None)
+    if checkpoint_path:
+        print(f"Resuming from W&B checkpoint: {checkpoint_path}")
+    elif args.resume_from_checkpoint:
+        print("Resuming from local checkpoint (legacy mode)")
+    
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
 
     # 8. Final evaluation on HumanEval Benchmark (after training)
     print("\n--- Final Evaluation on HumanEval Benchmark ---")
@@ -814,7 +836,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 mixed precision.")
     parser.add_argument("--bf16", action="store_true", help="Enable BF16 mixed precision.")
-    parser.add_argument("--resume_from_checkpoint", action="store_true", help="Resume training from the latest checkpoint.")
+    parser.add_argument("--resume_from_checkpoint", action="store_true", help="Resume training from the latest checkpoint (legacy - local files).")
+    parser.add_argument("--wandb_checkpoint_artifact", type=str, default=None, 
+                        help="W&B artifact path to resume from (e.g., 'johnrcumming/dylo-moe-full-training/best-dylora-model-full:v0'). "
+                             "Downloads the checkpoint from W&B and resumes training. Overrides --resume_from_checkpoint.")
     parser.add_argument("--training_subset", type=int, default=None, help="Percentage of training data to use.")
     parser.add_argument("--eval_subset", type=int, default=None, help="Percentage of evaluation data to use.")
     parser.add_argument("--model_name", type=str, default="google/codegemma-2b", help="The base model to use.")

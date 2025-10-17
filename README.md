@@ -118,17 +118,54 @@ Available datasets (use with `--datasets "dataset1,dataset2,..."`):
 - `--eval_subset`: Percentage of eval data to use
 - `--bf16`: Use BF16 mixed precision (recommended)
 - `--fp16`: Use FP16 mixed precision
-- `--resume_from_checkpoint`: Resume from latest checkpoint
+- `--resume_from_checkpoint`: Resume from latest checkpoint (legacy - local files)
+- `--wandb_checkpoint_artifact`: Resume from W&B artifact (e.g., "username/project/artifact:v0")
 - `--datasets`: Comma-separated list of datasets (default: "code_alpaca,mbpp")
 - `--interleaved_sampling`: Use 50/50 balanced sampling (works with 2 datasets)
 - `--balance_coefficient`: Load balancing loss coefficient (default: 0.01)
+
+### Checkpoint Resumption
+
+DyLoRA-MoE supports resuming training from Weights & Biases checkpoints:
+
+```bash
+# Resume from W&B artifact (works everywhere - local & cloud)
+python train.py \
+  --wandb_checkpoint_artifact "johnrcumming/dylo-moe-full-training/best-dylora-model-full:v0" \
+  --datasets "code_alpaca,mbpp" \
+  --bf16 \
+  --num_epochs 10
+
+# For Vertex AI: Edit submit_full_training.py
+# Set: WANDB_CHECKPOINT_ARTIFACT = "username/project/artifact:version"
+```
+
+See [CHECKPOINT_RESUMPTION.md](CHECKPOINT_RESUMPTION.md) for complete guide with examples.
+
+### Docker Setup
+
+DyLoRA-MoE images are available on Docker Hub for easy local development:
+
+```bash
+# Pull latest image
+docker pull johnrcumming/dylora-moe:latest
+
+# Run training locally in Docker
+docker run --rm --gpus all \
+  -e HF_TOKEN=$HF_TOKEN \
+  -e WANDB_API_KEY=$WANDB_API_KEY \
+  johnrcumming/dylora-moe:latest \
+  python train.py --bf16 --num_epochs 3 --training_subset 10
+```
+
+See [DOCKER_SETUP.md](DOCKER_SETUP.md) for complete Docker Hub guide.
 
 ### Vertex AI Training
 
 For cloud-based training on Google Cloud Vertex AI:
 
 ```bash
-# Build and push Docker image
+# Build and push Docker image (to GCP Artifact Registry + Docker Hub)
 ./build_and_push.sh
 
 # Submit training job

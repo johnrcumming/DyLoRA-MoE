@@ -28,14 +28,21 @@ hf_token = os.environ.get("HF_TOKEN")
 if not hf_token:
     raise ValueError("HF_TOKEN environment variable not set.")
 
+# Optional: W&B artifact path for checkpoint resumption
+# Format: "username/project/artifact:version" (e.g., "johnrcumming/dylo-moe-full-training/best-dylora-model-full:v0")
+# Set to None to start fresh training
+#WANDB_CHECKPOINT_ARTIFACT = "johnrcumming001/dylo-moe-full-training/best-dylora-model-full:v11"  # Change this to resume from a specific W&B artifact
+WANDB_CHECKPOINT_ARTIFACT = None  # Start fresh training
+
 # Define the worker pool spec for a Spot VM
 worker_pool_specs = [
     {
         "machine_spec": {
-            #"machine_type": "a2-highgpu-1g",
-            #"accelerator_type": "NVIDIA_TESLA_A100",
-            "machine_type": "a3-highgpu-1g",
-            "accelerator_type": "NVIDIA_H100_80GB",
+            "machine_type": "a2-highgpu-1g",
+            "accelerator_type": "NVIDIA_TESLA_A100",
+            # Do Not use H100 GPU as the cost is too high
+            #"machine_type": "a3-highgpu-1g", 
+            #"accelerator_type": "NVIDIA_H100_80GB",
             "accelerator_count": 1,
         },
         "replica_count": 1,
@@ -53,11 +60,11 @@ worker_pool_specs = [
                 "--num_experts", "2",
                 "--balance_coefficient", "0.01",  # Load balancing loss
                 "--cosine_restarts",  # LR scheduler with restarts
-                "--train_batch_size", "4",  # Minimal for large dataset + multi-expert forward
-                "--eval_batch_size", "2",  # Reduced eval batch to save memory
-                "--gradient_accumulation_steps", "64",  # Large accumulation: effective batch = 128
-                "--early_stopping_patience", "3",
-            ],
+                "--train_batch_size", "2",  # Proven stable for MoE multi-expert forward passes
+                "--eval_batch_size", "2",  # Conservative for evaluation memory
+                "--gradient_accumulation_steps", "64",  # Effective batch = 128
+                "--early_stopping_patience", "5",  # Increased patience for large-scale training
+            ] + (["--wandb_checkpoint_artifact", WANDB_CHECKPOINT_ARTIFACT] if WANDB_CHECKPOINT_ARTIFACT else []),
             "args": [],
             "env": [
                 {"name": "WANDB_API_KEY", "value": wandb_api_key},
@@ -75,6 +82,10 @@ job = aiplatform.CustomJob(
 
 # Run the training job
 print("Submitting the software development training job...")
+if WANDB_CHECKPOINT_ARTIFACT:
+    print(f"📦 Resuming from W&B checkpoint: {WANDB_CHECKPOINT_ARTIFACT}")
+else:
+    print("🆕 Starting fresh training (no checkpoint)")
 job.run(
     service_account=f"dylora-moe@{PROJECT_ID}.iam.gserviceaccount.com",
     # The 'use_spot_vms' parameter is not directly in the run method for CustomJob,
