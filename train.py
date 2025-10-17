@@ -518,6 +518,65 @@ def evaluate_humaneval(model, tokenizer, humaneval_dataset, max_samples=None):
     model.train()
     return results
 
+    print()
+
+
+def get_optimal_lr_config(args):
+    """
+    Determine optimal learning rate configuration based on training duration.
+    """
+    num_epochs = args.num_epochs
+    
+    # Auto strategy selection
+    if args.lr_strategy == "auto":
+        if num_epochs == 1:
+            strategy = "constant"
+            warmup_ratio = 0.05  # Very short warmup for 1 epoch
+            learning_rate = 3e-5  # Slightly lower LR for stability
+        elif num_epochs <= 3:
+            strategy = "linear"
+            warmup_ratio = 0.1 if not args.scale_lr_for_short_training else 0.05
+            learning_rate = 4e-5 if args.scale_lr_for_short_training else 5e-5
+        else:
+            strategy = "cosine_with_restarts" if args.cosine_restarts else "cosine"
+            warmup_ratio = 0.1
+            learning_rate = 5e-5
+    else:
+        # Use user-specified strategy
+        strategy = args.lr_strategy
+        if args.scale_lr_for_short_training and num_epochs <= 3:
+            warmup_ratio = 0.05
+            learning_rate = 3e-5 if num_epochs == 1 else 4e-5
+        else:
+            warmup_ratio = 0.1
+            learning_rate = 5e-5
+    
+    # Handle cosine_restarts override
+    if args.cosine_restarts and strategy in ["cosine", "auto"]:
+        strategy = "cosine_with_restarts"
+    
+    # Configure scheduler kwargs
+    scheduler_kwargs = {}
+    if strategy == "cosine_with_restarts":
+        # Adjust cycles based on training length
+        if num_epochs == 1:
+            scheduler_kwargs = {"num_cycles": 0.5}  # Half cycle for 1 epoch
+        elif num_epochs <= 3:
+            scheduler_kwargs = {"num_cycles": 1}    # One cycle for short training
+        else:
+            scheduler_kwargs = {"num_cycles": 2}    # Default 2 cycles
+    
+    print(f"📊 Learning Rate Configuration:")
+    print(f"   Strategy: {strategy}")
+    print(f"   Learning Rate: {learning_rate}")
+    print(f"   Warmup Ratio: {warmup_ratio}")
+    if scheduler_kwargs:
+        print(f"   Scheduler Args: {scheduler_kwargs}")
+    print()
+    
+    return strategy, learning_rate, warmup_ratio, scheduler_kwargs
+
+
 def main(args):
     # 0. Check environment variables first
     hf_token, wandb_token = check_environment_variables()
@@ -758,9 +817,11 @@ def main(args):
 
 
 
-    # 5. Configure the training arguments
+    # 5. Configure training arguments with optimal learning rate strategy
+    lr_strategy, learning_rate, warmup_ratio, scheduler_kwargs = get_optimal_lr_config(args)
+    
     # Updated training schedule for Phase 1 improvements:
-    # - Increased LR to 5e-5 (from 2e-5) for faster convergence
+    # - Adaptive learning rate strategy based on training duration
     # - Using cosine_with_restarts scheduler for better exploration
     # - Reduced early stopping patience to 2 (from 3) to stop at optimal point
     # - Added early stopping threshold of 0.005 for plateau detection
@@ -771,11 +832,11 @@ def main(args):
         per_device_eval_batch_size=args.eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,  # Configurable: effective batch size = train_batch_size * gradient_accumulation_steps
         gradient_checkpointing=False,  # DISABLED: Breaks gradient flow with multi-expert routing
-        learning_rate=5e-5,  # Increased from 2e-5 for faster convergence
+        learning_rate=learning_rate,  # Adaptive based on training duration
         weight_decay=0.01,
-        warmup_ratio=0.1,
-        lr_scheduler_type="cosine_with_restarts" if args.cosine_restarts else "cosine",
-        lr_scheduler_kwargs={"num_cycles": 2} if args.cosine_restarts else {},
+        warmup_ratio=warmup_ratio,  # Adaptive based on training duration
+        lr_scheduler_type=lr_strategy,
+        lr_scheduler_kwargs=scheduler_kwargs,
         fp16=args.fp16,
         bf16=args.bf16,
         logging_dir='./logs_full',
@@ -928,6 +989,10 @@ if __name__ == "__main__":
     parser.add_argument("--balance_coefficient", type=float, default=0.01, help="Coefficient for load balancing auxiliary loss (0 to disable).")
     parser.add_argument("--interleaved_sampling", action="store_true", help="Use interleaved sampling for balanced dataset representation (50/50 Code Alpaca and MBPP).")
     parser.add_argument("--cosine_restarts", action="store_true", help="Use cosine_with_restarts learning rate scheduler with 2 cycles for better exploration.")
+    parser.add_argument("--lr_strategy", type=str, default="auto", choices=["auto", "constant", "linear", "cosine", "cosine_restarts"], 
+                        help="Learning rate strategy. 'auto' adapts based on num_epochs: constant for 1 epoch, linear for 2-3, cosine for 4+.")
+    parser.add_argument("--scale_lr_for_short_training", action="store_true", 
+                        help="Scale learning rate and warmup for short training runs (< 4 epochs).")
     parser.add_argument("--train_batch_size", type=int, default=4, help="Per-device training batch size.")
     parser.add_argument("--eval_batch_size", type=int, default=4, help="Per-device evaluation batch size.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Number of gradient accumulation steps (effective batch size = train_batch_size * gradient_accumulation_steps).")
