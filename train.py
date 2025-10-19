@@ -3,6 +3,7 @@ import os
 import argparse
 os.environ["WANDB_DISABLED"] = "false"
 import wandb
+from huggingface_hub import login as hf_login
 from tqdm import tqdm
 import math
 import time
@@ -27,6 +28,78 @@ from data.prepare_data import (
     get_dataset,
     AVAILABLE_DATASETS,
 )
+
+
+def check_environment_variables():
+    """
+    Check for required environment variables and provide helpful error messages.
+    Returns the tokens for use in initialization.
+    """
+    missing_vars = []
+    warnings = []
+    
+    # Check for HF_TOKEN (required for model access)
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        missing_vars.append("HF_TOKEN")
+    
+    # Check for WANDB_API_KEY (optional but recommended)
+    wandb_token = os.environ.get("WANDB_API_KEY")
+    if not wandb_token:
+        warnings.append("WANDB_API_KEY")
+    
+    # Print errors and warnings
+    if missing_vars:
+        print("\n❌ ERROR: Required environment variables are missing:")
+        for var in missing_vars:
+            if var == "HF_TOKEN":
+                print(f"   - {var}: Required for accessing Hugging Face models")
+                print("     Get your token from: https://huggingface.co/settings/tokens")
+                print("     Set it with: export HF_TOKEN=your_token_here")
+        print("\nTraining cannot proceed without these variables.")
+        exit(1)
+    
+    if warnings:
+        print("\n⚠️  WARNING: Recommended environment variables are missing:")
+        for var in warnings:
+            if var == "WANDB_API_KEY":
+                print(f"   - {var}: Recommended for experiment tracking and logging")
+                print("     Get your key from: https://wandb.ai/authorize")
+                print("     Set it with: export WANDB_API_KEY=your_key_here")
+        print("\nTraining will continue, but some features may be limited.\n")
+    else:
+        print("✓ All environment variables are properly configured.\n")
+    
+    return hf_token, wandb_token
+
+
+def initialize_services(hf_token, wandb_token):
+    """
+    Initialize Weights & Biases and Hugging Face Hub with provided tokens.
+    """
+    print("--- Initializing Services ---")
+    
+    # Initialize Hugging Face Hub
+    if hf_token:
+        try:
+            hf_login(token=hf_token, add_to_git_credential=True)
+            print("✓ Hugging Face Hub initialized successfully")
+        except Exception as e:
+            print(f"❌ Failed to initialize Hugging Face Hub: {e}")
+            print("Training may fail when accessing gated models")
+    
+    # Initialize Weights & Biases
+    if wandb_token:
+        try:
+            wandb.login(key=wandb_token)
+            print("✓ Weights & Biases initialized successfully")
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to initialize Weights & Biases: {e}")
+            print("Experiment tracking may be limited")
+    else:
+        print("⚠️  Weights & Biases will use existing login or run anonymously")
+    
+    print()
 
 
 class GradientMonitoringCallback(TrainerCallback):
@@ -424,10 +497,16 @@ def evaluate_humaneval(model, tokenizer, humaneval_dataset, max_samples=None, us
     return results
 
 def main(args):
-    # 1. Initialize wandb
+    # 0. Check environment variables first
+    hf_token, wandb_token = check_environment_variables()
+    
+    # 1. Initialize services (HuggingFace Hub and Weights & Biases)
+    initialize_services(hf_token, wandb_token)
+    
+    # 2. Initialize wandb project
     wandb.init(project="dylo-moe-full-training")
 
-    # 2. Download checkpoint from W&B if resuming
+    # 3. Download checkpoint from W&B if resuming
     checkpoint_path = None
     if args.wandb_checkpoint_artifact:
         print(f"\n--- Downloading checkpoint from W&B artifact: {args.wandb_checkpoint_artifact} ---")
@@ -441,8 +520,7 @@ def main(args):
             print("Proceeding without checkpoint...")
             checkpoint_path = None
 
-    # 3. Instantiate the model
-    hf_token = os.environ.get("HF_TOKEN")
+    # 4. Instantiate the model (using hf_token from environment check)
     model = DyLoRA_MoE(
         args.model_name,
         num_experts=args.num_experts,
