@@ -28,7 +28,28 @@ For more details, refer to the [Technical Paper](DyLoRA%20-%20Technical%20Paper.
 - CUDA-capable GPU (recommended)
 - Hugging Face account with API token
 
-### Installation
+### Quick Start (Docker)
+
+The easiest way to get started is with our pre-built Docker container:
+
+```bash
+# Training
+docker run --rm --gpus all \
+  -e HF_TOKEN=$HF_TOKEN \
+  -e WANDB_API_KEY=$WANDB_API_KEY \
+  johnrcumming/dylora-moe:latest \
+  --train --datasets "code_alpaca,mbpp" --num_epochs 3
+
+# Benchmarking
+docker run --rm --gpus all \
+  -e HF_TOKEN=$HF_TOKEN \
+  johnrcumming/dylora-moe:latest \
+  --benchmark --base-model --max-samples 20
+```
+
+See the **[Entrypoint Guide](ENTRYPOINT_GUIDE.md)** for complete Docker usage and platform-specific optimizations.
+
+### Local Installation
 
 1. **Clone the repository:**
    ```bash
@@ -93,6 +114,38 @@ python train.py \
   --bf16 \
   --num_epochs 3
 ```
+
+### Benchmarking
+
+DyLoRA-MoE includes a comprehensive benchmarking system using HumanEval:
+
+```bash
+# Benchmark a local model
+python benchmark.py --model-path "./results/best_model" --max-samples 164
+
+# Benchmark a W&B artifact
+python benchmark.py --wandb-artifact "user/project/model:v0" --max-samples 164
+
+# Benchmark the base model (no fine-tuning)
+python benchmark.py --base-model --max-samples 164
+
+# Quick benchmark with fewer samples
+python benchmark.py --base-model --max-samples 20 --temperature 0.2
+```
+
+### Unified Container Interface
+
+For containerized deployments, use the unified entrypoint that supports both training and benchmarking:
+
+```bash
+# Training via container
+python entrypoint.py --train --datasets "code_alpaca,mbpp" --num_epochs 10
+
+# Benchmarking via container  
+python entrypoint.py --benchmark --base-model --max-samples 164
+```
+
+See **[ENTRYPOINT_GUIDE.md](ENTRYPOINT_GUIDE.md)** for complete usage, platform detection, and cloud deployment examples.
 
 #### Available Datasets
 
