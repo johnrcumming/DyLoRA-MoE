@@ -60,7 +60,7 @@ def load_base_model(model_name: str, hf_token: Optional[str] = None):
         return None, None
 
 
-def load_trained_model(model_path: str, tokenizer, hf_token: Optional[str] = None):
+def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] = None):
     """Load trained DyLoRA-MoE model from local path."""
     print(f"\n--- Loading Trained Model: {model_path} ---")
     
@@ -75,26 +75,39 @@ def load_trained_model(model_path: str, tokenizer, hf_token: Optional[str] = Non
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
                 device_map="auto" if torch.cuda.is_available() else None
             )
+            
+            # Get tokenizer if not provided
+            if tokenizer is None:
+                # Try to get base model name from adapter config
+                import json
+                config_path = os.path.join(model_path, "adapter_config.json")
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    base_model_name = config.get("base_model_name_or_path", "google/codegemma-2b")
+                
+                tokenizer = AutoTokenizer.from_pretrained(base_model_name, token=hf_token)
+                tokenizer.pad_token = tokenizer.eos_token
+                
         else:
             # Try to load as DyLoRA_MoE directly
             # This would require reconstruction - for now, use PEFT format
             raise ValueError(f"Model at {model_path} is not in expected PEFT format")
         
         print(f"✓ Trained model loaded from: {model_path}")
-        return model
+        return model, tokenizer
         
     except Exception as e:
         print(f"❌ Failed to load trained model: {e}")
-        return None
+        return None, None
 
 
-def load_wandb_artifact(artifact_path: str, tokenizer, hf_token: Optional[str] = None):
+def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[str] = None):
     """Load trained model from W&B artifact."""
     print(f"\n--- Loading Model from W&B Artifact: {artifact_path} ---")
     
     try:
         # Initialize wandb (will use WANDB_API_KEY from environment)
-        wandb.init(project="dylo-moe-benchmarking", mode="offline")
+        wandb.init(project="dylo-moe-benchmarking", mode="online")
         
         # Download artifact
         artifact = wandb.use_artifact(artifact_path, type='model')
@@ -108,15 +121,15 @@ def load_wandb_artifact(artifact_path: str, tokenizer, hf_token: Optional[str] =
             model_path = artifact_dir  # Use root if no best_model subdirectory
         
         # Load the model using the same logic as local loading
-        model = load_trained_model(model_path, tokenizer, hf_token)
+        model, model_tokenizer = load_trained_model(model_path, tokenizer, hf_token)
         
         wandb.finish()
-        return model
+        return model, model_tokenizer
         
     except Exception as e:
         print(f"❌ Failed to load W&B artifact: {e}")
         wandb.finish()
-        return None
+        return None, None
 
 
 def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list, 
@@ -237,15 +250,22 @@ def compare_results(results: Dict[str, Any], benchmarks: list):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DyLoRA-MoE Benchmark Suite")
+    parser = argparse.ArgumentParser(
+        description="DyLoRA-MoE Benchmark Suite",
+        epilog="Examples:\n"
+               "  python benchmark.py --base_model google/codegemma-2b --max_samples 20\n"
+               "  python benchmark.py --wandb_artifact user/project/model:v0 --max_samples 164\n"
+               "  python benchmark.py --trained_model ./results/best_model --max_samples 50\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     
     # Model arguments
-    parser.add_argument("--base_model", type=str, required=True,
-                       help="Base model name (e.g., 'google/codegemma-2b')")
+    parser.add_argument("--base_model", type=str, default=None,
+                       help="Base model name (e.g., 'google/codegemma-2b'). Optional if using --wandb_artifact or --trained_model.")
     parser.add_argument("--trained_model", type=str, default=None,
                        help="Path to trained model directory (e.g., './results_full/best_model')")
     parser.add_argument("--wandb_artifact", type=str, default=None,
-                       help="W&B artifact path (e.g., 'user/project/artifact:v0')")
+                       help="W&B artifact path (e.g., 'user/project/artifact:v0'). Contains model and tokenizer.")
     
     # Benchmark arguments
     parser.add_argument("--benchmarks", type=str, nargs="+", default=["humaneval"],
@@ -263,35 +283,53 @@ def main():
     
     args = parser.parse_args()
     
+    # Validate arguments
+    if not args.base_model and not args.wandb_artifact and not args.trained_model:
+        print("❌ Error: Must specify at least one of --base_model, --wandb_artifact, or --trained_model")
+        sys.exit(1)
+    
     # Set up environment
     hf_token = args.hf_token or os.environ.get("HF_TOKEN")
     if args.wandb_key:
         os.environ["WANDB_API_KEY"] = args.wandb_key
     
-    # Load base model
-    base_model, tokenizer = load_base_model(args.base_model, hf_token)
-    if base_model is None:
-        print("❌ Cannot proceed without base model")
-        sys.exit(1)
-    
     # Prepare models dictionary
-    models = {"base": base_model}
+    models = {}
+    
+    # Load base model if specified
+    if args.base_model:
+        base_model, tokenizer = load_base_model(args.base_model, hf_token)
+        if base_model is None:
+            print("❌ Cannot proceed without base model")
+            sys.exit(1)
+        models["base"] = base_model
+    else:
+        # We'll get tokenizer from the first loaded model
+        tokenizer = None
     
     # Load trained model if specified
     if args.trained_model:
-        trained_model = load_trained_model(args.trained_model, tokenizer, hf_token)
+        trained_model, trained_tokenizer = load_trained_model(args.trained_model, tokenizer, hf_token)
         if trained_model is not None:
             models["trained"] = trained_model
+            if tokenizer is None:
+                tokenizer = trained_tokenizer
     
     # Load W&B artifact if specified
     if args.wandb_artifact:
-        wandb_model = load_wandb_artifact(args.wandb_artifact, tokenizer, hf_token)
+        wandb_model, wandb_tokenizer = load_wandb_artifact(args.wandb_artifact, tokenizer, hf_token)
         if wandb_model is not None:
             models["wandb"] = wandb_model
+            if tokenizer is None:
+                tokenizer = wandb_tokenizer
     
-    # Validate that we have at least one model
+    # Validate that we have at least one model and tokenizer
     if len(models) == 0:
         print("❌ No models loaded successfully")
+        sys.exit(1)
+    
+    if tokenizer is None:
+        print("❌ No tokenizer available")
         sys.exit(1)
     
     # Initialize W&B if logging requested
