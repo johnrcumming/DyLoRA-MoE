@@ -34,7 +34,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dylo_moe.model import DyLoRA_MoE
-from benchmark.humaneval_benchmark import HumanEvalBenchmark
+from benchmarks.humaneval_benchmark import HumanEvalBenchmark
 
 
 def load_base_model(model_name: str, hf_token: Optional[str] = None):

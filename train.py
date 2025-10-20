@@ -452,7 +452,7 @@ def evaluate_humaneval(model, tokenizer, humaneval_dataset, max_samples=None, us
     Returns:
         dict: Contains 'pass@1' score and generation samples
     """
-    from benchmark.humaneval_benchmark import HumanEvalBenchmark
+    from benchmarks.humaneval_benchmark import HumanEvalBenchmark
     
     print("\n--- Evaluating on HumanEval Benchmark ---")
     
