@@ -7,15 +7,17 @@ WORKDIR /app
 # Copy the current directory contents into the container at /app
 COPY dylo_moe/ /app/dylo_moe/
 COPY data/ /app/data/
+COPY benchmarks/ /app/benchmarks/
 COPY train.py /app/
+COPY benchmark.py /app/
+COPY entrypoint.py /app/
 COPY requirements.txt /app/
 
 # Install any needed packages specified in requirements.txt
 RUN pip install -r /app/requirements.txt
 
-# Define the command to run the training script
-#CMD ["python", "train.py"]
+# Set the unified entrypoint
+ENTRYPOINT ["python", "entrypoint.py"]
 
-ENTRYPOINT ["python", "train.py"]
-
-CMD ["--datasets", "code_alpaca,mbpp,evol_instruct,code_feedback", "--bf16", "--num_epochs", "5", "--num_experts", "2", "--balance_coefficient", "0.01", "--cosine_restarts", "--train_batch_size", "4", "--eval_batch_size", "4", "--gradient_accumulation_steps", "32"]
+# Default to training with common parameters
+CMD ["--train", "--datasets", "code_alpaca,mbpp", "--bf16", "--num_epochs", "5", "--num_experts", "2", "--balance_coefficient", "0.01", "--cosine_restarts"]

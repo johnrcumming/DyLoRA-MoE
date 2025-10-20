@@ -53,7 +53,7 @@ worker_pool_specs = [
         "container_spec": {
             "image_uri": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{DOCKER_REPO_NAME}/{IMAGE_NAME}:{IMAGE_TAG}",
             "command": [
-                "python", "train.py",
+                "python", "entrypoint.py", "--train",
                 "--datasets", "code_alpaca,mbpp,evol_instruct,code_feedback",  # Large-scale: ~230k examples
                 "--bf16", 
                 "--num_epochs", "10",

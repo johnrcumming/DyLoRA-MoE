@@ -1,5 +1,6 @@
 import torch
 import os
+import json
 import argparse
 os.environ["WANDB_DISABLED"] = "false"
 import wandb
@@ -438,84 +439,62 @@ def preprocess_training_dataset(tokenizer, skill_data, pack=True):
         dataset = Dataset.from_dict({"input_ids": tokenized_data.input_ids, "attention_mask": tokenized_data.attention_mask, "labels": tokenized_data.input_ids})
     return dataset
 
-def evaluate_humaneval(model, tokenizer, humaneval_dataset, max_samples=None):
+def evaluate_humaneval(model, tokenizer, humaneval_dataset, max_samples=None, use_test_execution=False):
     """
-    Evaluate model on HumanEval benchmark by generating code completions.
+    Evaluate model on HumanEval benchmark using the new benchmark system.
+    
+    Args:
+        model: Model to evaluate
+        tokenizer: Tokenizer for the model
+        humaneval_dataset: HumanEval dataset (for compatibility, not used directly)
+        max_samples: Maximum number of samples to evaluate
+        use_test_execution: If True, use actual test execution for Pass@1 (slower but accurate)
     
     Returns:
         dict: Contains 'pass@1' score and generation samples
     """
+    from benchmarks.humaneval_benchmark import HumanEvalBenchmark
+    
     print("\n--- Evaluating on HumanEval Benchmark ---")
     
-    # Use subset if specified
-    eval_samples = list(humaneval_dataset)
-    if max_samples:
-        eval_samples = eval_samples[:max_samples]
+    # Create benchmark instance
+    benchmark = HumanEvalBenchmark(
+        tokenizer=tokenizer,
+        max_new_tokens=256,
+        timeout_seconds=10,
+        use_test_execution=use_test_execution
+    )
     
-    print(f"Generating completions for {len(eval_samples)} HumanEval problems...")
+    # Run benchmark
+    result = benchmark.run_benchmark(
+        model=model,
+        max_samples=max_samples,
+        log_to_wandb=False,  # Don't log to wandb during training (handled separately)
+        prefix="training"
+    )
     
-    model.eval()
-    generations = []
-    correct = 0
+    # Extract metrics for compatibility with existing code
+    metrics = result['metrics']
     
-    with torch.no_grad():
-        for i, example in enumerate(eval_samples):
-            prompt = example.get('prompt', '')
-            canonical_solution = example.get('canonical_solution', '')
-            test = example.get('test', '')
-            entry_point = example.get('entry_point', '')
-            
-            # Generate completion
-            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-            if torch.cuda.is_available():
-                inputs = {k: v.cuda() for k, v in inputs.items()}
-            elif torch.backends.mps.is_available():
-                inputs = {k: v.to('mps') for k, v in inputs.items()}
-            
-            # Generate using DyLoRA-MoE's generate method (uses router to select expert)
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=256,
-                temperature=0.2,
-                do_sample=True,
-                top_p=0.95,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-            
-            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            # Extract just the completion (remove the prompt)
-            completion = generated_text[len(prompt):].strip()
-            
-            generations.append({
-                'task_id': example.get('task_id', f'HumanEval/{i}'),
-                'prompt': prompt,
-                'completion': completion,
-                'canonical_solution': canonical_solution,
-            })
-            
-            # Simple heuristic check: does generated code contain the entry point?
-            if entry_point and entry_point in completion:
-                correct += 1
-            
-            if (i + 1) % 10 == 0:
-                print(f"  Generated {i + 1}/{len(eval_samples)} completions...")
-    
-    # Calculate pass@1 approximation (heuristic-based, not exact)
-    # Note: True pass@1 requires running tests, which we skip for training monitoring
-    pass_at_1_approx = correct / len(eval_samples) if eval_samples else 0.0
+    # Map new metrics to old format for backward compatibility
+    pass_at_1 = metrics.get('pass@1', metrics.get('entry_point_score', 0.0))
     
     results = {
-        'pass@1_approx': pass_at_1_approx,
-        'num_samples': len(eval_samples),
-        'num_with_entry_point': correct,
-        'sample_generations': generations[:5],  # First 5 for inspection
+        'pass@1_approx': pass_at_1,
+        'num_samples': metrics.get('total_samples', 0),
+        'num_with_entry_point': int(metrics.get('entry_point_score', 0.0) * metrics.get('total_samples', 0)),
+        'sample_generations': result.get('samples', [])[:5],  # First 5 for inspection
+        'full_metrics': metrics,  # Include all metrics from new system
     }
     
-    print(f"HumanEval Pass@1 (approx): {pass_at_1_approx:.2%}")
-    print(f"Generations with entry point: {correct}/{len(eval_samples)}")
+    print(f"HumanEval Pass@1: {pass_at_1:.2%}")
+    if use_test_execution:
+        print(f"  - Test execution Pass@1: {metrics.get('pass@1', 0.0):.2%}")
+        print(f"  - Syntax score: {metrics.get('syntax_score', 0.0):.2%}")
+        print(f"  - Entry point score: {metrics.get('entry_point_score', 0.0):.2%}")
+    else:
+        print(f"  - Entry point heuristic: {metrics.get('entry_point_score', 0.0):.2%}")
     
-    model.train()
     return results
 
     print()
@@ -715,9 +694,9 @@ def main(args):
     print("BASELINE EVALUATION: Base Model (Before LoRA Training)")
     print("="*80)
     
-    # Evaluate base model's code generation capability
+    # Evaluate base model's code generation capability (quick heuristic evaluation)
     baseline_results = evaluate_humaneval(
-        model, tokenizer, humaneval_dataset
+        model, tokenizer, humaneval_dataset, use_test_execution=False
     )
     
     wandb.log({
@@ -922,9 +901,9 @@ def main(args):
     final_eval = trainer.evaluate(metric_key_prefix="eval")
     print(f"Final HumanEval Loss: {final_eval['eval_loss']:.4f}")
     
-    # Evaluate HumanEval code generation (pass@1 approximation)
+    # Evaluate HumanEval code generation (use actual test execution for final evaluation)
     final_humaneval_results = evaluate_humaneval(
-        model, tokenizer, humaneval_dataset, max_samples=20  # Use subset for speed
+        model, tokenizer, humaneval_dataset, max_samples=20, use_test_execution=True
     )
     
     wandb.log({
@@ -948,6 +927,22 @@ def main(args):
     trainer.save_state()  # Saves optimizer, scheduler, etc. to output_dir
     tokenizer.save_pretrained(best_model_dir)
     torch.save(training_args, os.path.join(training_args.output_dir, "training_args.bin"))
+    
+    # Save config.json with base model information for benchmark.py
+    config_data = {
+        "base_model_name_or_path": args.model_name,
+        "num_experts": args.num_experts,
+        "lora_r": args.lora_r,
+        "lora_alpha": args.lora_alpha,
+        "lora_dropout": args.lora_dropout,
+        "model_type": "dylora-moe",
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    config_path = os.path.join(best_model_dir, "config.json")
+    with open(config_path, 'w') as f:
+        json.dump(config_data, f, indent=2)
+    print(f"Configuration saved to {config_path}")
+    
     print(f"Best model, tokenizer, and training args saved to {best_model_dir} and {training_args.output_dir}")
 
     # Save DyLoRA-MoE specific state

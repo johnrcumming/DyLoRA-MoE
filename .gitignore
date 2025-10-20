@@ -9,6 +9,7 @@ __pycache__/
 results/
 logs/
 results_poc/
+artifacts/
 
 # Weights & Biases
 wandb/
