@@ -88,10 +88,61 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                 tokenizer = AutoTokenizer.from_pretrained(base_model_name, token=hf_token)
                 tokenizer.pad_token = tokenizer.eos_token
                 
+        elif os.path.exists(os.path.join(model_path, "model.safetensors")) or os.path.exists(os.path.join(model_path, "pytorch_model.bin")):
+            # Check if this is a DyLoRA-MoE model (has dylo_moe_state directory alongside)
+            parent_dir = os.path.dirname(model_path)
+            dylo_moe_state_dir = os.path.join(parent_dir, "dylo_moe_state")
+            
+            if os.path.exists(dylo_moe_state_dir):
+                # This is a DyLoRA-MoE model saved from W&B artifact
+                print("Detected DyLoRA-MoE model format")
+                
+                # Get tokenizer first
+                if tokenizer is None:
+                    if os.path.exists(os.path.join(model_path, "tokenizer.json")):
+                        tokenizer = AutoTokenizer.from_pretrained(model_path, token=hf_token)
+                        tokenizer.pad_token = tokenizer.eos_token
+                    else:
+                        # Fallback to default base model
+                        tokenizer = AutoTokenizer.from_pretrained("google/codegemma-2b", token=hf_token)
+                        tokenizer.pad_token = tokenizer.eos_token
+                
+                # Load as regular AutoModelForCausalLM (DyLoRA-MoE was saved as full merged model)
+                # Use more aggressive memory management for large models
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                    device_map="auto" if torch.cuda.is_available() else "cpu",
+                    low_cpu_mem_usage=True,
+                    offload_folder="./offload" if not torch.cuda.is_available() else None
+                )
+                
+                print("✓ Loaded DyLoRA-MoE model as merged AutoModelForCausalLM")
+                
+            else:
+                # Regular full model format (saved with trainer.save_model())
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                    device_map="auto" if torch.cuda.is_available() else None
+                )
+                
+                # Get tokenizer if not provided
+                if tokenizer is None:
+                    # Try to load tokenizer from the same directory
+                    if os.path.exists(os.path.join(model_path, "tokenizer.json")):
+                        tokenizer = AutoTokenizer.from_pretrained(model_path, token=hf_token)
+                        tokenizer.pad_token = tokenizer.eos_token
+                    else:
+                        # Fallback to default base model
+                        tokenizer = AutoTokenizer.from_pretrained("google/codegemma-2b", token=hf_token)
+                        tokenizer.pad_token = tokenizer.eos_token
+                
         else:
-            # Try to load as DyLoRA_MoE directly
-            # This would require reconstruction - for now, use PEFT format
-            raise ValueError(f"Model at {model_path} is not in expected PEFT format")
+            # Unknown format
+            available_files = os.listdir(model_path)
+            raise ValueError(f"Model at {model_path} is in unknown format. Available files: {available_files}")
+        
         
         print(f"✓ Trained model loaded from: {model_path}")
         return model, tokenizer

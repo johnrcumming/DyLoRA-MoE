@@ -14,10 +14,10 @@ Examples:
   python entrypoint.py --train --datasets "code_alpaca,mbpp" --num_epochs 10 --bf16
   
   # Benchmarking
-  python entrypoint.py --benchmark --model-path "./results/best_model" --max-samples 164
+  python entrypoint.py --benchmark --trained_model "./results/best_model" --max_samples 164
   
   # W&B artifact benchmarking
-  python entrypoint.py --benchmark --wandb-artifact "user/project/model:v0" --max-samples 50
+  python entrypoint.py --benchmark --wandb_artifact "user/project/model:v0" --max_samples 50
 """
 
 import argparse
@@ -247,12 +247,8 @@ def add_platform_defaults(args, mode, platform):
             
     elif mode == "benchmark":
         # Benchmarking defaults
-        if "--max-samples" not in args_dict:
-            defaults.extend(["--max-samples", "164"])  # Full HumanEval
-        if "--temperature" not in args_dict:
-            defaults.extend(["--temperature", "0.2"])
-        if "--max-tokens" not in args_dict:
-            defaults.extend(["--max-tokens", "256"])
+        if "--max_samples" not in args_dict:
+            defaults.extend(["--max_samples", "164"])  # Full HumanEval
     
     return args + defaults
 
