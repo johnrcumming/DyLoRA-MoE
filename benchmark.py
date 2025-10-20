@@ -4,22 +4,23 @@ DyLoRA-MoE Benchmark Suite
 
 Comprehensive benchmarking system for evaluating code generation models.
 Supports comparing base models with trained models (local or W&B artifacts).
+By default, results are logged to Weights & Biases (use --no_wandb to disable).
 
 Usage:
-    # Compare base model with local trained model
-    python benchmark.py --base_model google/codegemma-2b --trained_model ./results_full/best_model
+    # Compare base model with local trained model (uses google/codegemma-2b by default)
+    python benchmark.py --trained_model ./results_full/best_model
 
-    # Compare base model with W&B artifact
-    python benchmark.py --base_model google/codegemma-2b --wandb_artifact "user/project/artifact:v0"
+    # Compare base model with W&B artifact (uses google/codegemma-2b by default)
+    python benchmark.py --wandb_artifact "user/project/artifact:v0"
 
-    # Run only specific benchmarks
-    python benchmark.py --benchmarks humaneval --base_model google/codegemma-2b
+    # Run only specific benchmarks with custom base model
+    python benchmark.py --benchmarks humaneval --base_model microsoft/DialoGPT-medium
 
-    # Full evaluation (all samples)
-    python benchmark.py --base_model google/codegemma-2b --max_samples 164
+    # Full evaluation (all samples, uses default base model)
+    python benchmark.py --max_samples 164
 
-    # Quick test (subset)
-    python benchmark.py --base_model google/codegemma-2b --max_samples 20
+    # Quick test (subset, disable W&B logging, uses default base model)
+    python benchmark.py --max_samples 20 --no_wandb
 """
 
 import os
@@ -35,6 +36,28 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dylo_moe.model import DyLoRA_MoE
 from benchmarks.humaneval_benchmark import HumanEvalBenchmark
+
+
+def get_base_model_from_config(model_path: str) -> Optional[str]:
+    """
+    Try to read base_model_name_or_path from config.json in the model directory.
+    Returns None if config doesn't exist or doesn't contain the field.
+    """
+    import json
+    config_path = os.path.join(model_path, "config.json")
+    
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                base_model = config.get("base_model_name_or_path")
+                if base_model:
+                    print(f"📄 Found base model in config: {base_model}")
+                    return base_model
+        except Exception as e:
+            print(f"⚠️  Warning: Could not read config.json: {e}")
+    
+    return None
 
 
 def load_base_model(model_name: str, hf_token: Optional[str] = None):
@@ -153,7 +176,7 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
 
 
 def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[str] = None):
-    """Load trained model from W&B artifact."""
+    """Load trained model from W&B artifact. Returns (model, tokenizer, base_model_name)"""
     print(f"\n--- Loading Model from W&B Artifact: {artifact_path} ---")
     
     try:
@@ -171,16 +194,19 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
         if not os.path.exists(model_path):
             model_path = artifact_dir  # Use root if no best_model subdirectory
         
+        # Check for config.json to get base model info
+        config_base_model = get_base_model_from_config(model_path)
+        
         # Load the model using the same logic as local loading
         model, model_tokenizer = load_trained_model(model_path, tokenizer, hf_token)
         
         wandb.finish()
-        return model, model_tokenizer
+        return model, model_tokenizer, config_base_model
         
     except Exception as e:
         print(f"❌ Failed to load W&B artifact: {e}")
         wandb.finish()
-        return None, None
+        return None, None, None
 
 
 def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list, 
@@ -304,14 +330,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="DyLoRA-MoE Benchmark Suite",
         epilog="Examples:\n"
-               "  python benchmark.py --base_model google/codegemma-2b --max_samples 20\n"
+               "  python benchmark.py --max_samples 20  # Uses default google/codegemma-2b\n"
                "  python benchmark.py --wandb_artifact user/project/model:v0 --max_samples 164\n"
-               "  python benchmark.py --trained_model ./results/best_model --max_samples 50\n",
+               "  python benchmark.py --trained_model ./results/best_model --max_samples 50\n"
+               "  python benchmark.py --wandb_artifact user/project/model:v0 --no_wandb  # Disable W&B logging\n",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     # Model arguments
-    parser.add_argument("--base_model", type=str, default=None,
+    parser.add_argument("--base_model", type=str, default="google/codegemma-2b",
                        help="Base model name (e.g., 'google/codegemma-2b'). Optional if using --wandb_artifact or --trained_model.")
     parser.add_argument("--trained_model", type=str, default=None,
                        help="Path to trained model directory (e.g., './results_full/best_model')")
@@ -329,20 +356,39 @@ def main():
                        help="HuggingFace token (default: from HF_TOKEN env var)")
     parser.add_argument("--wandb_key", type=str, default=None,
                        help="W&B API key (default: from WANDB_API_KEY env var)")
-    parser.add_argument("--log_to_wandb", action="store_true",
-                       help="Log results to W&B")
+    parser.add_argument("--no_wandb", action="store_true",
+                       help="Disable W&B logging (default: enabled)")
     
     args = parser.parse_args()
     
     # Validate arguments
-    if not args.base_model and not args.wandb_artifact and not args.trained_model:
-        print("❌ Error: Must specify at least one of --base_model, --wandb_artifact, or --trained_model")
-        sys.exit(1)
+    if not args.wandb_artifact and not args.trained_model:
+        print(f"ℹ️  Using default base model: {args.base_model}")
+        if not args.base_model:
+            print("❌ Error: Must specify at least one of --base_model, --wandb_artifact, or --trained_model")
+            sys.exit(1)
+    
+    # Set logging preference (default: log to wandb unless --no_wandb specified)
+    log_to_wandb = not args.no_wandb
     
     # Set up environment
     hf_token = args.hf_token or os.environ.get("HF_TOKEN")
     if args.wandb_key:
         os.environ["WANDB_API_KEY"] = args.wandb_key
+    
+    # Try to determine base model from config files if not explicitly provided
+    config_base_model = None
+    if args.trained_model and os.path.exists(args.trained_model):
+        config_base_model = get_base_model_from_config(args.trained_model)
+    
+    # For W&B artifacts, we'll get the config after downloading
+    # So we handle that separately below
+    
+    # Use config base model if found and no explicit base_model argument was provided
+    # Check if base_model is the default value
+    if config_base_model and args.base_model == "google/codegemma-2b":
+        print(f"ℹ️  Using base model from trained model config: {config_base_model}")
+        args.base_model = config_base_model
     
     # Prepare models dictionary
     models = {}
@@ -368,11 +414,20 @@ def main():
     
     # Load W&B artifact if specified
     if args.wandb_artifact:
-        wandb_model, wandb_tokenizer = load_wandb_artifact(args.wandb_artifact, tokenizer, hf_token)
+        wandb_model, wandb_tokenizer, wandb_config_base_model = load_wandb_artifact(args.wandb_artifact, tokenizer, hf_token)
         if wandb_model is not None:
             models["wandb"] = wandb_model
             if tokenizer is None:
                 tokenizer = wandb_tokenizer
+            
+            # If we found a config base model from wandb artifact and haven't loaded base model yet
+            if wandb_config_base_model and "base" not in models:
+                print(f"ℹ️  Loading base model from W&B artifact config: {wandb_config_base_model}")
+                base_model, base_tokenizer = load_base_model(wandb_config_base_model, hf_token)
+                if base_model is not None:
+                    models["base"] = base_model
+                    if tokenizer is None:
+                        tokenizer = base_tokenizer
     
     # Validate that we have at least one model and tokenizer
     if len(models) == 0:
@@ -383,8 +438,8 @@ def main():
         print("❌ No tokenizer available")
         sys.exit(1)
     
-    # Initialize W&B if logging requested
-    if args.log_to_wandb:
+    # Initialize W&B if logging requested (default: True, unless --no_wandb)
+    if log_to_wandb:
         wandb.init(project="dylo-moe-benchmarks", 
                   config={
                       "base_model": args.base_model,
@@ -408,7 +463,7 @@ def main():
             tokenizer=tokenizer,
             benchmarks=args.benchmarks,
             max_samples=args.max_samples,
-            log_to_wandb=args.log_to_wandb
+            log_to_wandb=log_to_wandb
         )
         
         # Compare results
@@ -421,7 +476,7 @@ def main():
             print(f"{'='*100}")
         
     finally:
-        if args.log_to_wandb:
+        if log_to_wandb:
             wandb.finish()
 
 

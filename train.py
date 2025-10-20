@@ -1,5 +1,6 @@
 import torch
 import os
+import json
 import argparse
 os.environ["WANDB_DISABLED"] = "false"
 import wandb
@@ -865,6 +866,22 @@ def main(args):
     trainer.save_state()  # Saves optimizer, scheduler, etc. to output_dir
     tokenizer.save_pretrained(best_model_dir)
     torch.save(training_args, os.path.join(training_args.output_dir, "training_args.bin"))
+    
+    # Save config.json with base model information for benchmark.py
+    config_data = {
+        "base_model_name_or_path": args.model_name,
+        "num_experts": args.num_experts,
+        "lora_r": args.lora_r,
+        "lora_alpha": args.lora_alpha,
+        "lora_dropout": args.lora_dropout,
+        "model_type": "dylora-moe",
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    config_path = os.path.join(best_model_dir, "config.json")
+    with open(config_path, 'w') as f:
+        json.dump(config_data, f, indent=2)
+    print(f"Configuration saved to {config_path}")
+    
     print(f"Best model, tokenizer, and training args saved to {best_model_dir} and {training_args.output_dir}")
 
     # Save DyLoRA-MoE specific state
