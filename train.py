@@ -695,9 +695,9 @@ def main(args):
     print("BASELINE EVALUATION: Base Model (Before LoRA Training)")
     print("="*80)
     
-    # Evaluate base model's code generation capability (quick heuristic evaluation)
+    # Evaluate base model's code generation capability 
     baseline_results = evaluate_humaneval(
-        model, tokenizer, humaneval_dataset, use_test_execution=False
+        model, tokenizer, humaneval_dataset, use_test_execution=True
     )
     
     wandb.log({

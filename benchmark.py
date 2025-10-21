@@ -2,21 +2,7 @@
 """
 DyLoRA-MoE Benchmark Suite
 
-Comprehensive benchmarking system for         if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                    model_type = config.get("model_type")
-                    base_model_name = config.get("base_model_name_or_path")
-                    
-                    if model_type == "dylora-moe":
-                        is_dylora_moe = True
-                        print("Detected DyLoRA-MoE model format")
-                    elif model_type and "dylora" in str(model_type).lower():
-                        is_dylora_moe = True
-                        print(f"Detected DyLoRA variant: {model_type}")
-            except (json.JSONDecodeError, Exception) as e:
-                print(f"Warning: Could not read config.json: {e}") generation models.
+Comprehensive benchmarking system for generation models.
 Supports comparing base models with trained models (local or W&B artifacts).
 By default, results are logged to Weights & Biases (use --no_wandb to disable).
 
@@ -28,7 +14,7 @@ Usage:
     python benchmark.py --wandb_artifact "user/project/artifact:v0"
 
     # Run only specific benchmarks with custom base model
-    python benchmark.py --benchmarks humaneval --base_model microsoft/DialoGPT-medium
+    python benchmark.py --benchmarks humaneval --model_name microsoft/DialoGPT-medium
 
     # Full evaluation (all samples, uses default base model)
     python benchmark.py --max_samples 164
@@ -167,22 +153,70 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                     tokenizer.pad_token = tokenizer.eos_token
                 
                 # Load the DyLoRA-MoE model from the saved state
-                # The trainer.save_model() actually saves the merged/flattened model
-                # so we can load it as a regular AutoModelForCausalLM
+                # trainer.save_model() on a PEFT model saves the PEFT structure
+                # Check for PEFT structure in the saved weights
                 
-                # Check if this contains PEFT adapters or a merged model
-                if os.path.exists(os.path.join(model_path, "adapter_config.json")):
-                    # This is a PEFT model - load with PEFT
-                    from peft import AutoPeftModelForCausalLM
-                    model = AutoPeftModelForCausalLM.from_pretrained(
-                        model_path,
-                        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                        device_map="auto" if torch.cuda.is_available() else "cpu",
-                        low_cpu_mem_usage=True
-                    )
-                    print("✓ Loaded as PEFT model")
-                    
-                else:
+                # Check if weights contain PEFT/LoRA structure
+                model_file = os.path.join(model_path, "model.safetensors")
+                pytorch_model = os.path.join(model_path, "pytorch_model.bin")
+                has_peft_structure = False
+                
+                if os.path.exists(model_file):
+                    # Quick check: do weight keys contain PEFT indicators?
+                    try:
+                        from safetensors import safe_open
+                        with safe_open(model_file, framework="pt", device="cpu") as f:
+                            keys = list(f.keys())
+                            has_peft_structure = any("lora_A" in k or "lora_B" in k or "base_layer" in k for k in keys[:10])
+                    except:
+                        pass
+                elif os.path.exists(pytorch_model):
+                    try:
+                        state_dict = torch.load(pytorch_model, map_location="cpu")
+                        has_peft_structure = any("lora_A" in k or "lora_B" in k or "base_layer" in k for k in list(state_dict.keys())[:10])
+                    except:
+                        pass
+                
+                # Try loading as PEFT model if structure indicates it
+                if has_peft_structure or os.path.exists(os.path.join(model_path, "adapter_config.json")):
+                    print("Detected PEFT/LoRA structure in saved weights - loading with PEFT...")
+                    try:
+                        from peft import PeftModel, PeftConfig
+                        
+                        # Load base model first
+                        print(f"Loading base model: {effective_base_model}")
+                        base_model = AutoModelForCausalLM.from_pretrained(
+                            effective_base_model,
+                            token=hf_token,
+                            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                            device_map="auto" if torch.cuda.is_available() else "cpu",
+                            low_cpu_mem_usage=True
+                        )
+                        
+                        # Try loading PEFT config if it exists
+                        if os.path.exists(os.path.join(model_path, "adapter_config.json")):
+                            model = PeftModel.from_pretrained(base_model, model_path)
+                        else:
+                            # Load PEFT weights manually
+                            print("Loading PEFT weights into base model...")
+                            if os.path.exists(model_file):
+                                from safetensors.torch import load_file
+                                state_dict = load_file(model_file)
+                            else:
+                                state_dict = torch.load(pytorch_model, map_location="cpu")
+                            
+                            # Load the PEFT weights
+                            base_model.load_state_dict(state_dict, strict=False)
+                            model = base_model
+                        
+                        print("✓ Loaded as PEFT model")
+                        
+                    except Exception as peft_error:
+                        print(f"⚠️  PEFT loading failed: {peft_error}")
+                        print("Falling back to standard loading...")
+                        has_peft_structure = False  # Fall through to standard loading
+                
+                if not has_peft_structure:
                     # This should be a merged model saved by trainer.save_model()
                     # Fix or create a valid config.json that AutoModel can understand
                     
@@ -530,15 +564,14 @@ def parse_args(argv=None):
                "  python benchmark.py --max_samples 20  # Uses default google/codegemma-2b\n"
                "  python benchmark.py --wandb_artifact user/project/model:v0 --max_samples 164\n"
                "  python benchmark.py --trained_model ./results/best_model --max_samples 50\n"
+               "  python benchmark.py --model_name microsoft/phi-2 --trained_model ./results/best_model\n"
                "  python benchmark.py --wandb_artifact user/project/model:v0 --no_wandb  # Disable W&B logging\n",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     # Model arguments
-    parser.add_argument("--base_model", type=str, default="google/codegemma-2b",
+    parser.add_argument("--model_name", type=str, default="google/codegemma-2b",
                        help="Base model name (e.g., 'google/codegemma-2b'). Optional if using --wandb_artifact or --trained_model.")
-    parser.add_argument("--model_name", type=str, default=None,
-                       help="Base model name (alias for --base_model). If specified, overrides --base_model.")
     parser.add_argument("--trained_model", type=str, default=None,
                        help="Path to trained model directory (e.g., './results_full/best_model')")
     parser.add_argument("--wandb_artifact", type=str, default=None,
@@ -566,16 +599,11 @@ def main(args=None):
     if args is None:
         args = parse_args()
     
-    # Handle --model_name as alias for --base_model
-    if args.model_name:
-        args.base_model = args.model_name
-        print(f"ℹ️  Using model_name as base_model: {args.base_model}")
-    
     # Validate arguments
     if not args.wandb_artifact and not args.trained_model:
-        print(f"ℹ️  Using default base model: {args.base_model}")
-        if not args.base_model:
-            print("❌ Error: Must specify at least one of --base_model, --wandb_artifact, or --trained_model")
+        print(f"ℹ️  Using default base model: {args.model_name}")
+        if not args.model_name:
+            print("❌ Error: Must specify at least one of --model_name, --wandb_artifact, or --trained_model")
             sys.exit(1)
     
     # Set logging preference (default: log to wandb unless --no_wandb specified)
@@ -594,18 +622,18 @@ def main(args=None):
     # For W&B artifacts, we'll get the config after downloading
     # So we handle that separately below
     
-    # Use config base model if found and no explicit base_model argument was provided
-    # Check if base_model is the default value
-    if config_base_model and args.base_model == "google/codegemma-2b":
+    # Use config base model if found and no explicit model_name argument was provided
+    # Check if model_name is the default value
+    if config_base_model and args.model_name == "google/codegemma-2b":
         print(f"ℹ️  Using base model from trained model config: {config_base_model}")
-        args.base_model = config_base_model
+        args.model_name = config_base_model
     
     # Prepare models dictionary
     models = {}
     
     # Load base model if specified
-    if args.base_model:
-        base_model, tokenizer = load_base_model(args.base_model, hf_token)
+    if args.model_name:
+        base_model, tokenizer = load_base_model(args.model_name, hf_token)
         if base_model is None:
             print("❌ Cannot proceed without base model")
             sys.exit(1)
@@ -625,7 +653,7 @@ def main(args=None):
     # Load W&B artifact if specified
     if args.wandb_artifact:
         wandb_model, wandb_tokenizer, wandb_config_base_model = load_wandb_artifact(
-            args.wandb_artifact, tokenizer, hf_token, args.base_model
+            args.wandb_artifact, tokenizer, hf_token, args.model_name
         )
         if wandb_model is not None:
             models["wandb"] = wandb_model
@@ -660,7 +688,7 @@ def main(args=None):
     if log_to_wandb:
         wandb.init(project="dylo-moe-benchmarks", 
                   config={
-                      "base_model": args.base_model,
+                      "model_name": args.model_name,
                       "trained_model": args.trained_model,
                       "wandb_artifact": args.wandb_artifact,
                       "benchmarks": args.benchmarks,
