@@ -2,7 +2,21 @@
 """
 DyLoRA-MoE Benchmark Suite
 
-Comprehensive benchmarking system for evaluating code generation models.
+Comprehensive benchmarking system for         if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    model_type = config.get("model_type")
+                    base_model_name = config.get("base_model_name_or_path")
+                    
+                    if model_type == "dylora-moe":
+                        is_dylora_moe = True
+                        print("Detected DyLoRA-MoE model format")
+                    elif model_type and "dylora" in str(model_type).lower():
+                        is_dylora_moe = True
+                        print(f"Detected DyLoRA variant: {model_type}")
+            except (json.JSONDecodeError, Exception) as e:
+                print(f"Warning: Could not read config.json: {e}") generation models.
 Supports comparing base models with trained models (local or W&B artifacts).
 By default, results are logged to Weights & Biases (use --no_wandb to disable).
 
@@ -28,6 +42,7 @@ import sys
 import argparse
 import torch
 import wandb
+import json
 from typing import Optional, Dict, Any
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -83,15 +98,139 @@ def load_base_model(model_name: str, hf_token: Optional[str] = None):
         return None, None
 
 
-def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] = None):
-    """Load trained DyLoRA-MoE model from local path."""
+def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] = None, fallback_base_model: Optional[str] = None):
+    """Load trained DyLoRA-MoE model from local path.
+    
+    Args:
+        model_path: Path to the model directory
+        tokenizer: Optional existing tokenizer
+        hf_token: HuggingFace token
+        fallback_base_model: Base model to use if config doesn't specify one
+    """
     print(f"\n--- Loading Trained Model: {model_path} ---")
     
     try:
-        # Load the trained DyLoRA-MoE model
-        # This assumes the model was saved with trainer.save_model()
-        if os.path.exists(os.path.join(model_path, "adapter_config.json")):
-            # PEFT model format
+        # First, check if this is a DyLoRA-MoE model by looking at config.json
+        config_path = os.path.join(model_path, "config.json")
+        is_dylora_moe = False
+        base_model_name = None
+        
+        if os.path.exists(config_path):
+            import json
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    model_type = config.get("model_type")
+                    base_model_name = config.get("base_model_name_or_path")
+                    
+                    if model_type == "dylora-moe":
+                        is_dylora_moe = True
+                        print("Detected DyLoRA-MoE model format")
+                    elif "dylora" in str(model_type).lower():
+                        is_dylora_moe = True
+                        print(f"Detected DyLoRA variant: {model_type}")
+            except Exception as e:
+                print(f"Warning: Could not read config.json: {e}")
+        
+        # Handle DyLoRA-MoE models specially
+        if is_dylora_moe:
+            # Determine effective base model
+            effective_base_model = base_model_name or fallback_base_model
+            
+            if not effective_base_model:
+                print("⚠️  Warning: No base model found in config or provided as fallback. Using default: google/codegemma-2b")
+                effective_base_model = "google/codegemma-2b"
+            
+            print(f"Loading DyLoRA-MoE model with base: {effective_base_model}")
+            
+            # Load the DyLoRA-MoE model using the proper constructor
+            try:
+                # Get tokenizer first if not provided
+                if tokenizer is None:
+                    if os.path.exists(os.path.join(model_path, "tokenizer.json")):
+                        tokenizer = AutoTokenizer.from_pretrained(model_path, token=hf_token)
+                    else:
+                        tokenizer = AutoTokenizer.from_pretrained(effective_base_model, token=hf_token)
+                    tokenizer.pad_token = tokenizer.eos_token
+                
+                # Load the DyLoRA-MoE model from the saved state
+                # The trainer.save_model() actually saves the merged/flattened model
+                # so we can load it as a regular AutoModelForCausalLM
+                
+                # Check if this contains PEFT adapters or a merged model
+                if os.path.exists(os.path.join(model_path, "adapter_config.json")):
+                    # This is a PEFT model - load with PEFT
+                    from peft import AutoPeftModelForCausalLM
+                    model = AutoPeftModelForCausalLM.from_pretrained(
+                        model_path,
+                        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                        device_map="auto" if torch.cuda.is_available() else "cpu",
+                        low_cpu_mem_usage=True
+                    )
+                    print("✓ Loaded as PEFT model")
+                    
+                else:
+                    # This should be a merged model saved by trainer.save_model()
+                    # Create a temporary config that AutoModel can understand
+                    temp_config_path = os.path.join(model_path, "config_temp.json")
+                    
+                    # Load the base model config and modify it
+                    try:
+                        base_config = AutoModelForCausalLM.from_pretrained(
+                            effective_base_model, token=hf_token
+                        ).config.to_dict()
+                        
+                        # Update with any custom settings but keep the base model_type
+                        base_config.update({
+                            "base_model_name_or_path": effective_base_model,
+                            # Remove the dylora-moe model_type to use the base model's type
+                        })
+                        
+                        # Temporarily save the compatible config
+                        with open(temp_config_path, 'w') as f:
+                            json.dump(base_config, f, indent=2)
+                        
+                        # Now load with the compatible config
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_path,
+                            config=temp_config_path,
+                            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                            device_map="auto" if torch.cuda.is_available() else "cpu",
+                            low_cpu_mem_usage=True,
+                            trust_remote_code=True  # In case there are custom components
+                        )
+                        
+                        # Clean up temp file
+                        if os.path.exists(temp_config_path):
+                            os.remove(temp_config_path)
+                            
+                        print("✓ Loaded DyLoRA-MoE as merged AutoModelForCausalLM")
+                        
+                    except Exception as config_error:
+                        print(f"Config-based loading failed: {config_error}")
+                        
+                        # Fallback: try to load directly with trust_remote_code
+                        try:
+                            model = AutoModelForCausalLM.from_pretrained(
+                                model_path,
+                                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                                device_map="auto" if torch.cuda.is_available() else "cpu",
+                                low_cpu_mem_usage=True,
+                                trust_remote_code=True
+                            )
+                            print("✓ Loaded with trust_remote_code=True")
+                        except Exception as fallback_error:
+                            print(f"Fallback loading also failed: {fallback_error}")
+                            raise
+                        
+            except Exception as dylora_error:
+                print(f"DyLoRA-MoE specific loading failed: {dylora_error}")
+                print("Trying generic loading approaches...")
+                raise  # Re-raise to try other methods
+                
+        # Try PEFT adapter format
+        elif os.path.exists(os.path.join(model_path, "adapter_config.json")):
+            print("Detected PEFT adapter format")
             from peft import AutoPeftModelForCausalLM
             model = AutoPeftModelForCausalLM.from_pretrained(
                 model_path,
@@ -111,72 +250,64 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                 tokenizer = AutoTokenizer.from_pretrained(base_model_name, token=hf_token)
                 tokenizer.pad_token = tokenizer.eos_token
                 
+        # Try regular model format 
         elif os.path.exists(os.path.join(model_path, "model.safetensors")) or os.path.exists(os.path.join(model_path, "pytorch_model.bin")):
-            # Check if this is a DyLoRA-MoE model (has dylo_moe_state directory alongside)
+            print("Detected regular model format")
+            
+            # Check for dylo_moe_state directory (legacy format)
             parent_dir = os.path.dirname(model_path)
             dylo_moe_state_dir = os.path.join(parent_dir, "dylo_moe_state")
             
             if os.path.exists(dylo_moe_state_dir):
-                # This is a DyLoRA-MoE model saved from W&B artifact
-                print("Detected DyLoRA-MoE model format")
-                
-                # Get tokenizer first
-                if tokenizer is None:
-                    if os.path.exists(os.path.join(model_path, "tokenizer.json")):
-                        tokenizer = AutoTokenizer.from_pretrained(model_path, token=hf_token)
-                        tokenizer.pad_token = tokenizer.eos_token
-                    else:
-                        # Fallback to default base model
-                        tokenizer = AutoTokenizer.from_pretrained("google/codegemma-2b", token=hf_token)
-                        tokenizer.pad_token = tokenizer.eos_token
-                
-                # Load as regular AutoModelForCausalLM (DyLoRA-MoE was saved as full merged model)
-                # Use more aggressive memory management for large models
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                    device_map="auto" if torch.cuda.is_available() else "cpu",
-                    low_cpu_mem_usage=True,
-                    offload_folder="./offload" if not torch.cuda.is_available() else None
-                )
-                
-                print("✓ Loaded DyLoRA-MoE model as merged AutoModelForCausalLM")
-                
-            else:
-                # Regular full model format (saved with trainer.save_model())
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                    device_map="auto" if torch.cuda.is_available() else None
-                )
-                
-                # Get tokenizer if not provided
-                if tokenizer is None:
-                    # Try to load tokenizer from the same directory
-                    if os.path.exists(os.path.join(model_path, "tokenizer.json")):
-                        tokenizer = AutoTokenizer.from_pretrained(model_path, token=hf_token)
-                        tokenizer.pad_token = tokenizer.eos_token
-                    else:
-                        # Fallback to default base model
-                        tokenizer = AutoTokenizer.from_pretrained("google/codegemma-2b", token=hf_token)
-                        tokenizer.pad_token = tokenizer.eos_token
+                print("Found legacy DyLoRA-MoE state directory")
+            
+            # Get tokenizer first
+            if tokenizer is None:
+                if os.path.exists(os.path.join(model_path, "tokenizer.json")):
+                    tokenizer = AutoTokenizer.from_pretrained(model_path, token=hf_token)
+                    tokenizer.pad_token = tokenizer.eos_token
+                else:
+                    # Use base model from config or fallback
+                    fallback_model = base_model_name or "google/codegemma-2b"
+                    tokenizer = AutoTokenizer.from_pretrained(fallback_model, token=hf_token)
+                    tokenizer.pad_token = tokenizer.eos_token
+            
+            # Load model with increased robustness
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto" if torch.cuda.is_available() else "cpu",
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+                offload_folder="./offload" if not torch.cuda.is_available() else None
+            )
+            
+            print("✓ Loaded as regular AutoModelForCausalLM")
                 
         else:
             # Unknown format
             available_files = os.listdir(model_path)
             raise ValueError(f"Model at {model_path} is in unknown format. Available files: {available_files}")
         
-        
         print(f"✓ Trained model loaded from: {model_path}")
         return model, tokenizer
         
     except Exception as e:
         print(f"❌ Failed to load trained model: {e}")
+        import traceback
+        traceback.print_exc()
         return None, None
 
 
-def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[str] = None):
-    """Load trained model from W&B artifact. Returns (model, tokenizer, base_model_name)"""
+def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[str] = None, fallback_base_model: Optional[str] = None):
+    """Load trained model from W&B artifact. Returns (model, tokenizer, base_model_name)
+    
+    Args:
+        artifact_path: W&B artifact path
+        tokenizer: Optional existing tokenizer
+        hf_token: HuggingFace token
+        fallback_base_model: Base model to use if config doesn't specify one
+    """
     print(f"\n--- Loading Model from W&B Artifact: {artifact_path} ---")
     
     try:
@@ -194,14 +325,23 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
         if not os.path.exists(model_path):
             model_path = artifact_dir  # Use root if no best_model subdirectory
         
-        # Check for config.json to get base model info
+        # Check for config.json to get base model info (optional)
         config_base_model = get_base_model_from_config(model_path)
         
-        # Load the model using the same logic as local loading
-        model, model_tokenizer = load_trained_model(model_path, tokenizer, hf_token)
+        # Determine which base model to use
+        effective_base_model = config_base_model or fallback_base_model
+        
+        if not effective_base_model:
+            print("⚠️  Warning: No base model specified in config or arguments. Using default: google/codegemma-2b")
+            effective_base_model = "google/codegemma-2b"
+        else:
+            print(f"📄 Using base model: {effective_base_model} (from {'config' if config_base_model else 'argument'})")
+        
+        # Load the model using the same logic as local loading, but pass the effective base model
+        model, model_tokenizer = load_trained_model(model_path, tokenizer, hf_token, effective_base_model)
         
         wandb.finish()
-        return model, model_tokenizer, config_base_model
+        return model, model_tokenizer, effective_base_model
         
     except Exception as e:
         print(f"❌ Failed to load W&B artifact: {e}")
@@ -341,6 +481,8 @@ def parse_args(argv=None):
     # Model arguments
     parser.add_argument("--base_model", type=str, default="google/codegemma-2b",
                        help="Base model name (e.g., 'google/codegemma-2b'). Optional if using --wandb_artifact or --trained_model.")
+    parser.add_argument("--model_name", type=str, default=None,
+                       help="Base model name (alias for --base_model). If specified, overrides --base_model.")
     parser.add_argument("--trained_model", type=str, default=None,
                        help="Path to trained model directory (e.g., './results_full/best_model')")
     parser.add_argument("--wandb_artifact", type=str, default=None,
@@ -367,6 +509,11 @@ def main(args=None):
     """Main benchmark function. Can be called with pre-parsed args or will parse from command line."""
     if args is None:
         args = parse_args()
+    
+    # Handle --model_name as alias for --base_model
+    if args.model_name:
+        args.base_model = args.model_name
+        print(f"ℹ️  Using model_name as base_model: {args.base_model}")
     
     # Validate arguments
     if not args.wandb_artifact and not args.trained_model:
@@ -421,7 +568,9 @@ def main(args=None):
     
     # Load W&B artifact if specified
     if args.wandb_artifact:
-        wandb_model, wandb_tokenizer, wandb_config_base_model = load_wandb_artifact(args.wandb_artifact, tokenizer, hf_token)
+        wandb_model, wandb_tokenizer, wandb_config_base_model = load_wandb_artifact(
+            args.wandb_artifact, tokenizer, hf_token, args.base_model
+        )
         if wandb_model is not None:
             models["wandb"] = wandb_model
             if tokenizer is None:
