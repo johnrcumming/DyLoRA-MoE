@@ -20,12 +20,9 @@ Examples:
   python entrypoint.py --benchmark --wandb_artifact "user/project/model:v0" --max_samples 50
 """
 
-import argparse
 import sys
 import os
-import subprocess
 import logging
-from pathlib import Path
 
 # Setup logging
 logging.basicConfig(
@@ -123,78 +120,54 @@ def run_training(args):
     """Execute training with provided arguments."""
     logger.info("🚀 Starting DyLoRA-MoE Training")
     
-    # Build command for train.py
-    cmd = ["python", "train.py"] + args
-    
-    logger.info(f"Training command: {' '.join(cmd)}")
-    
     try:
-        # Run training with real-time output
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1
-        )
+        # Import train module and call main directly
+        import train
         
-        # Stream output in real-time
-        for line in iter(process.stdout.readline, ''):
-            print(line, end='')
+        # Parse arguments using train.py's argument parser
+        parsed_args = train.parse_args(args)
         
-        process.wait()
+        logger.info(f"Training with args: {vars(parsed_args)}")
         
-        if process.returncode == 0:
-            logger.info("✅ Training completed successfully")
-        else:
-            logger.error(f"❌ Training failed with exit code {process.returncode}")
-            sys.exit(process.returncode)
+        # Call train.main directly
+        train.main(parsed_args)
+        
+        logger.info("✅ Training completed successfully")
             
     except KeyboardInterrupt:
         logger.info("🛑 Training interrupted by user")
-        process.terminate()
         sys.exit(130)
     except Exception as e:
         logger.error(f"❌ Training failed with error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 def run_benchmark(args):
     """Execute benchmarking with provided arguments."""
     logger.info("📊 Starting DyLoRA-MoE Benchmarking")
     
-    # Build command for benchmark.py
-    cmd = ["python", "benchmark.py"] + args
-    
-    logger.info(f"Benchmark command: {' '.join(cmd)}")
-    
     try:
-        # Run benchmark with real-time output
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1
-        )
+        # Import benchmark module and call main directly
+        import benchmark
         
-        # Stream output in real-time
-        for line in iter(process.stdout.readline, ''):
-            print(line, end='')
+        # Parse arguments using benchmark.py's argument parser
+        parsed_args = benchmark.parse_args(args)
         
-        process.wait()
+        logger.info(f"Benchmarking with args: {vars(parsed_args)}")
         
-        if process.returncode == 0:
-            logger.info("✅ Benchmarking completed successfully")
-        else:
-            logger.error(f"❌ Benchmarking failed with exit code {process.returncode}")
-            sys.exit(process.returncode)
+        # Call benchmark.main directly
+        benchmark.main(parsed_args)
+        
+        logger.info("✅ Benchmarking completed successfully")
             
     except KeyboardInterrupt:
         logger.info("🛑 Benchmarking interrupted by user")
-        process.terminate()
         sys.exit(130)
     except Exception as e:
         logger.error(f"❌ Benchmarking failed with error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 def add_platform_defaults(args, mode, platform):

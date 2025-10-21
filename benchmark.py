@@ -326,7 +326,8 @@ def compare_results(results: Dict[str, Any], benchmarks: list):
                     print(f"{metric:<25} {'N/A':>15}")
 
 
-def main():
+def parse_args(argv=None):
+    """Parse command line arguments. Can be called with custom argv for programmatic use."""
     parser = argparse.ArgumentParser(
         description="DyLoRA-MoE Benchmark Suite",
         epilog="Examples:\n"
@@ -359,7 +360,13 @@ def main():
     parser.add_argument("--no_wandb", action="store_true",
                        help="Disable W&B logging (default: enabled)")
     
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main(args=None):
+    """Main benchmark function. Can be called with pre-parsed args or will parse from command line."""
+    if args is None:
+        args = parse_args()
     
     # Validate arguments
     if not args.wandb_artifact and not args.trained_model:

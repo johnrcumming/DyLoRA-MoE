@@ -904,7 +904,8 @@ def main(args):
 
     wandb.finish()
 
-if __name__ == "__main__":
+def parse_args(argv=None):
+    """Parse command line arguments. Can be called with custom argv for programmatic use."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 mixed precision.")
@@ -937,5 +938,9 @@ if __name__ == "__main__":
              "python_code_instructions_18k, python_code_23k_sharegpt. "
              "Example: --datasets 'code_alpaca,mbpp,evol_instruct'"
     )
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)
