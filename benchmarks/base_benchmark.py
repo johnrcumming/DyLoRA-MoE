@@ -45,8 +45,9 @@ class BaseBenchmark(ABC):
         }
         default_kwargs.update(generation_kwargs)
         
-        # Tokenize input
-        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+        # Tokenize input - use larger context for code generation
+        # HumanEval prompts can be long (docstrings + function signatures)
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
         
         # Move to model's device
         device = next(model.parameters()).device
@@ -64,6 +65,16 @@ class BaseBenchmark(ABC):
         # Decode and extract completion
         generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         completion = generated_text[len(prompt):].strip()
+        
+        # Debug: warn if completion is empty
+        if not completion:
+            # Only log occasionally to avoid spam
+            if not hasattr(self, '_empty_completion_count'):
+                self._empty_completion_count = 0
+            self._empty_completion_count += 1
+            if self._empty_completion_count <= 3:  # Log first 3 occurrences
+                print(f"  ⚠️  Warning: Generated empty completion (count: {self._empty_completion_count})")
+                print(f"     Prompt length: {len(prompt)} chars, Generated length: {len(generated_text)} chars")
         
         model.train()
         return completion
@@ -128,13 +139,20 @@ class BaseBenchmark(ABC):
             if wandb_metrics:
                 wandb.log(wandb_metrics, commit=False)
         
-        # Print results
+        # Print results with contextual info for execution metrics
         print(f"\n{self.name} Results:")
         for key, value in metrics.items():
-            if isinstance(value, float):
-                print(f"  {key}: {value:.4f}")
-            elif isinstance(value, int):
-                print(f"  {key}: {value}")
+            if key == 'execution_success_rate' and 'tests_run' in metrics:
+                tests_run = metrics.get('tests_run', 0)
+                if tests_run == 0:
+                    print(f"  {key}: N/A (no tests were executed)")
+                else:
+                    print(f"  {key}: {value:.4f} (over {tests_run} tests)")
+            else:
+                if isinstance(value, float):
+                    print(f"  {key}: {value:.4f}")
+                elif isinstance(value, int):
+                    print(f"  {key}: {value}")
         
         print(f"{'='*80}\n")
         

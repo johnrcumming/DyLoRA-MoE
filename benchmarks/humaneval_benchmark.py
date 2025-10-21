@@ -14,7 +14,7 @@ from data.prepare_data import download_humaneval
 class HumanEvalBenchmark(BaseBenchmark):
     """HumanEval benchmark for code generation evaluation."""
     
-    def __init__(self, tokenizer, max_new_tokens: int = 256, timeout_seconds: int = 10, 
+    def __init__(self, tokenizer, max_new_tokens: int = 512, timeout_seconds: int = 10, 
                  use_test_execution: bool = True):
         super().__init__("HumanEval", tokenizer, max_new_tokens)
         self.timeout_seconds = timeout_seconds
@@ -38,6 +38,17 @@ class HumanEvalBenchmark(BaseBenchmark):
         # Extract function definition from completion
         function_code = self._extract_function_code(completion, entry_point)
         
+        # Debug: Check why function_code might be empty
+        if self.use_test_execution and test and not function_code:
+            # Log first occurrence for debugging
+            if not hasattr(self, '_logged_empty_function'):
+                self._logged_empty_function = True
+                print(f"\n⚠️  DEBUG: Empty function_code extracted")
+                print(f"  Task: {task_id}")
+                print(f"  Entry point: {entry_point}")
+                print(f"  Completion length: {len(completion)}")
+                print(f"  Completion preview: {completion[:200] if completion else '(empty)'}")
+        
         # Basic checks
         has_entry_point = entry_point in completion if entry_point else False
         has_function_def = bool(re.search(r'def\s+\w+', completion))
@@ -46,10 +57,16 @@ class HumanEvalBenchmark(BaseBenchmark):
         # Execute tests if we have test code and test execution is enabled
         test_passed = False
         execution_error = None
-        
-        if self.use_test_execution and test and function_code:
-            test_passed, execution_error = self._execute_test(function_code, test)
-        
+        test_run = False
+
+        # Run tests if enabled and we have test code
+        # Use function_code if available, otherwise try with raw completion
+        if self.use_test_execution and test:
+            code_to_test = function_code if function_code and function_code.strip() else completion
+            if code_to_test and code_to_test.strip():  # Only run if we have non-empty code
+                test_run = True
+                test_passed, execution_error = self._execute_test(code_to_test, test)
+
         return {
             'task_id': task_id,
             'prompt': prompt,
@@ -61,6 +78,7 @@ class HumanEvalBenchmark(BaseBenchmark):
             'has_return': has_return,
             'test_passed': test_passed,
             'execution_error': execution_error,
+            'test_run': test_run,
             'success': True
         }
     
@@ -91,11 +109,14 @@ class HumanEvalBenchmark(BaseBenchmark):
         function_def_score = has_function_def / len(successful_results)
         return_score = has_return / len(successful_results)
         
-        # Execution success rate (no errors)
-        no_execution_errors = sum(1 for r in successful_results 
-                                 if r.get('execution_error') is None)
-        execution_success_rate = no_execution_errors / len(successful_results)
-        
+        # Execution success rate (no errors) — computed only over samples where tests were run
+        tests_run = sum(1 for r in successful_results if r.get('test_run'))
+        if tests_run > 0:
+            no_execution_errors = sum(1 for r in successful_results if r.get('test_run') and r.get('execution_error') is None)
+            execution_success_rate = no_execution_errors / tests_run
+        else:
+            execution_success_rate = 0.0
+
         # Combined syntax score
         syntax_score = (entry_point_score + function_def_score + return_score) / 3
         
@@ -107,6 +128,7 @@ class HumanEvalBenchmark(BaseBenchmark):
             'return_score': return_score,
             'execution_success_rate': execution_success_rate,
             'tests_passed': test_passed,
+            'tests_run': tests_run,
             'total_samples': len(successful_results),
         }
     

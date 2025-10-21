@@ -461,7 +461,7 @@ def evaluate_humaneval(model, tokenizer, humaneval_dataset, max_samples=None, us
     # Create benchmark instance
     benchmark = HumanEvalBenchmark(
         tokenizer=tokenizer,
-        max_new_tokens=256,
+        max_new_tokens=512,  # Increased to allow complete function generation
         timeout_seconds=10,
         use_test_execution=use_test_execution
     )
