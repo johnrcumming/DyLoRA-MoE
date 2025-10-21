@@ -10,6 +10,7 @@ import math
 import time
 from transformers import (
     AutoTokenizer,
+    AutoConfig,
     Trainer,
     TrainingArguments,
     DataCollatorForLanguageModeling,
@@ -903,7 +904,7 @@ def main(args):
     
     # Evaluate HumanEval code generation (use actual test execution for final evaluation)
     final_humaneval_results = evaluate_humaneval(
-        model, tokenizer, humaneval_dataset, max_samples=20, use_test_execution=True
+        model, tokenizer, humaneval_dataset, use_test_execution=True
     )
     
     wandb.log({
@@ -928,20 +929,28 @@ def main(args):
     tokenizer.save_pretrained(best_model_dir)
     torch.save(training_args, os.path.join(training_args.output_dir, "training_args.bin"))
     
-    # Save config.json with base model information for benchmark.py
-    config_data = {
-        "base_model_name_or_path": args.model_name,
-        "num_experts": args.num_experts,
-        "lora_r": args.lora_r,
-        "lora_alpha": args.lora_alpha,
-        "lora_dropout": args.lora_dropout,
-        "model_type": "dylora-moe",
-        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
+    # Save config.json with proper base model architecture + DyLoRA metadata
+    # This ensures the model can be loaded by AutoModelForCausalLM in benchmark.py
+    print("Creating loadable config.json with base model architecture...")
+    
+    # Get the base model's config (the actual architecture)
+    base_config = AutoConfig.from_pretrained(args.model_name)
+    base_config_dict = base_config.to_dict()
+    
+    # Add DyLoRA-specific metadata as extra fields (won't interfere with loading)
+    base_config_dict["base_model_name_or_path"] = args.model_name
+    base_config_dict["_dylora_num_experts"] = args.num_experts
+    base_config_dict["_dylora_lora_r"] = args.lora_r
+    base_config_dict["_dylora_lora_alpha"] = args.lora_alpha
+    base_config_dict["_dylora_lora_dropout"] = args.lora_dropout
+    base_config_dict["_dylora_trained"] = True
+    base_config_dict["_dylora_saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Save the merged config
     config_path = os.path.join(best_model_dir, "config.json")
     with open(config_path, 'w') as f:
-        json.dump(config_data, f, indent=2)
-    print(f"Configuration saved to {config_path}")
+        json.dump(base_config_dict, f, indent=2)
+    print(f"✓ Configuration saved to {config_path} (model_type: {base_config_dict.get('model_type')})")
     
     print(f"Best model, tokenizer, and training args saved to {best_model_dir} and {training_args.output_dir}")
 

@@ -44,7 +44,7 @@ import torch
 import wandb
 import json
 from typing import Optional, Dict, Any
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -58,7 +58,6 @@ def get_base_model_from_config(model_path: str) -> Optional[str]:
     Try to read base_model_name_or_path from config.json in the model directory.
     Returns None if config doesn't exist or doesn't contain the field.
     """
-    import json
     config_path = os.path.join(model_path, "config.json")
     
     if os.path.exists(config_path):
@@ -110,13 +109,19 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
     print(f"\n--- Loading Trained Model: {model_path} ---")
     
     try:
-        # First, check if this is a DyLoRA-MoE model by looking at config.json
+        # First, check if this is a DyLoRA-MoE model by looking at config.json or directory structure
         config_path = os.path.join(model_path, "config.json")
         is_dylora_moe = False
         base_model_name = None
         
+        # Check for legacy DyLoRA-MoE state directory (strong indicator)
+        parent_dir = os.path.dirname(model_path)
+        dylo_moe_state_dir = os.path.join(parent_dir, "dylo_moe_state")
+        if os.path.exists(dylo_moe_state_dir):
+            print("Found legacy DyLoRA-MoE state directory - treating as DyLoRA-MoE model")
+            is_dylora_moe = True
+        
         if os.path.exists(config_path):
-            import json
             try:
                 with open(config_path, 'r') as f:
                     config = json.load(f)
@@ -126,11 +131,19 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                     if model_type == "dylora-moe":
                         is_dylora_moe = True
                         print("Detected DyLoRA-MoE model format")
-                    elif "dylora" in str(model_type).lower():
+                    elif model_type and "dylora" in str(model_type).lower():
                         is_dylora_moe = True
                         print(f"Detected DyLoRA variant: {model_type}")
+                    elif not model_type or model_type not in ["gemma", "gemma2", "llama", "gpt2", "bert"]:
+                        # Invalid or missing model_type - if we found dylo_moe_state, treat as DyLoRA
+                        if os.path.exists(dylo_moe_state_dir):
+                            print(f"Config has invalid model_type '{model_type}', but dylo_moe_state exists")
+                            is_dylora_moe = True
             except Exception as e:
                 print(f"Warning: Could not read config.json: {e}")
+                # If we found dylo_moe_state directory, still treat as DyLoRA
+                if os.path.exists(dylo_moe_state_dir):
+                    is_dylora_moe = True
         
         # Handle DyLoRA-MoE models specially
         if is_dylora_moe:
@@ -171,60 +184,100 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                     
                 else:
                     # This should be a merged model saved by trainer.save_model()
-                    # Create a temporary config that AutoModel can understand
-                    temp_config_path = os.path.join(model_path, "config_temp.json")
+                    # Fix or create a valid config.json that AutoModel can understand
                     
-                    # Load the base model config and modify it
+                    print(f"Preparing valid config.json for model loading...")
+                    
+                    # Load base model config to get the correct model_type
+                    base_config = AutoConfig.from_pretrained(effective_base_model, token=hf_token)
+                    base_config_dict = base_config.to_dict()
+                    
+                    # Read existing config if it exists
+                    existing_config = {}
+                    if os.path.exists(config_path):
+                        try:
+                            with open(config_path, 'r') as f:
+                                existing_config = json.load(f)
+                        except:
+                            pass
+                    
+                    # Merge configs: start with base, overlay existing, ensure critical fields
+                    merged_config = base_config_dict.copy()
+                    merged_config.update(existing_config)
+                    
+                    # Ensure critical fields are set correctly
+                    merged_config["model_type"] = base_config_dict.get("model_type")  # Use base model's type
+                    merged_config["base_model_name_or_path"] = effective_base_model
+                    merged_config["architectures"] = base_config_dict.get("architectures", merged_config.get("architectures"))
+                    
+                    # Preserve DyLoRA-specific metadata for reference
+                    if existing_config.get("model_type") == "dylora-moe":
+                        merged_config["_dylora_original_type"] = "dylora-moe"
+                        merged_config["num_experts"] = existing_config.get("num_experts")
+                        merged_config["lora_r"] = existing_config.get("lora_r")
+                        merged_config["lora_alpha"] = existing_config.get("lora_alpha")
+                    
+                    # Write the fixed config
+                    with open(config_path, 'w') as f:
+                        json.dump(merged_config, f, indent=2)
+                    
+                    print(f"✓ Created valid config.json with model_type: {merged_config['model_type']}")
+                    
+                    # Now load with the fixed config
                     try:
-                        base_config = AutoModelForCausalLM.from_pretrained(
-                            effective_base_model, token=hf_token
-                        ).config.to_dict()
-                        
-                        # Update with any custom settings but keep the base model_type
-                        base_config.update({
-                            "base_model_name_or_path": effective_base_model,
-                            # Remove the dylora-moe model_type to use the base model's type
-                        })
-                        
-                        # Temporarily save the compatible config
-                        with open(temp_config_path, 'w') as f:
-                            json.dump(base_config, f, indent=2)
-                        
-                        # Now load with the compatible config
                         model = AutoModelForCausalLM.from_pretrained(
                             model_path,
-                            config=temp_config_path,
                             torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
                             device_map="auto" if torch.cuda.is_available() else "cpu",
                             low_cpu_mem_usage=True,
                             trust_remote_code=True  # In case there are custom components
                         )
-                        
-                        # Clean up temp file
-                        if os.path.exists(temp_config_path):
-                            os.remove(temp_config_path)
-                            
                         print("✓ Loaded DyLoRA-MoE as merged AutoModelForCausalLM")
                         
-                    except Exception as config_error:
-                        print(f"Config-based loading failed: {config_error}")
+                    except Exception as load_error:
+                        print(f"⚠️  Standard loading failed: {load_error}")
+                        print("Attempting alternative loading method...")
                         
-                        # Fallback: try to load directly with trust_remote_code
+                        # Alternative: Load weights into a fresh base model
                         try:
+                            import safetensors.torch
+                            
+                            # Create a fresh base model
+                            print(f"Creating fresh base model: {effective_base_model}")
                             model = AutoModelForCausalLM.from_pretrained(
-                                model_path,
+                                effective_base_model,
+                                token=hf_token,
                                 torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
                                 device_map="auto" if torch.cuda.is_available() else "cpu",
-                                low_cpu_mem_usage=True,
-                                trust_remote_code=True
+                                low_cpu_mem_usage=True
                             )
-                            print("✓ Loaded with trust_remote_code=True")
-                        except Exception as fallback_error:
-                            print(f"Fallback loading also failed: {fallback_error}")
+                            
+                            # Load the saved weights
+                            weights_file = None
+                            if os.path.exists(os.path.join(model_path, "model.safetensors")):
+                                weights_file = os.path.join(model_path, "model.safetensors")
+                            elif os.path.exists(os.path.join(model_path, "pytorch_model.bin")):
+                                weights_file = os.path.join(model_path, "pytorch_model.bin")
+                            
+                            if weights_file:
+                                print(f"Loading weights from: {os.path.basename(weights_file)}")
+                                if weights_file.endswith(".safetensors"):
+                                    state_dict = safetensors.torch.load_file(weights_file)
+                                else:
+                                    state_dict = torch.load(weights_file, map_location="cpu")
+                                
+                                # Load state dict into model
+                                model.load_state_dict(state_dict, strict=False)
+                                print("✓ Loaded weights into base model")
+                            else:
+                                print("⚠️  No weight files found, using base model weights")
+                                
+                        except Exception as alt_error:
+                            print(f"❌ Alternative loading also failed: {alt_error}")
                             raise
                         
             except Exception as dylora_error:
-                print(f"DyLoRA-MoE specific loading failed: {dylora_error}")
+                print(f"❌ DyLoRA-MoE specific loading failed: {dylora_error}")
                 print("Trying generic loading approaches...")
                 raise  # Re-raise to try other methods
                 
@@ -241,7 +294,6 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
             # Get tokenizer if not provided
             if tokenizer is None:
                 # Try to get base model name from adapter config
-                import json
                 config_path = os.path.join(model_path, "adapter_config.json")
                 with open(config_path, 'r') as f:
                     config = json.load(f)
@@ -253,13 +305,6 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
         # Try regular model format 
         elif os.path.exists(os.path.join(model_path, "model.safetensors")) or os.path.exists(os.path.join(model_path, "pytorch_model.bin")):
             print("Detected regular model format")
-            
-            # Check for dylo_moe_state directory (legacy format)
-            parent_dir = os.path.dirname(model_path)
-            dylo_moe_state_dir = os.path.join(parent_dir, "dylo_moe_state")
-            
-            if os.path.exists(dylo_moe_state_dir):
-                print("Found legacy DyLoRA-MoE state directory")
             
             # Get tokenizer first
             if tokenizer is None:
@@ -310,15 +355,22 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
     """
     print(f"\n--- Loading Model from W&B Artifact: {artifact_path} ---")
     
+    # Use a separate W&B run for artifact downloading to avoid interfering with main benchmark run
+    wandb_run = None
     try:
-        # Initialize wandb (will use WANDB_API_KEY from environment)
-        wandb.init(project="dylo-moe-benchmarking", mode="online")
+        # Initialize wandb in a separate context (will use WANDB_API_KEY from environment)
+        wandb_run = wandb.init(project="dylo-moe-benchmarking", mode="online", reinit=True)
         
         # Download artifact
         artifact = wandb.use_artifact(artifact_path, type='model')
         artifact_dir = artifact.download()
         
         print(f"✓ Artifact downloaded to: {artifact_dir}")
+        
+        # Finish the download run before loading the model
+        if wandb_run:
+            wandb_run.finish()
+            wandb_run = None
         
         # Look for the best_model subdirectory
         model_path = os.path.join(artifact_dir, "best_model")
@@ -340,13 +392,17 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
         # Load the model using the same logic as local loading, but pass the effective base model
         model, model_tokenizer = load_trained_model(model_path, tokenizer, hf_token, effective_base_model)
         
-        wandb.finish()
         return model, model_tokenizer, effective_base_model
         
     except Exception as e:
         print(f"❌ Failed to load W&B artifact: {e}")
-        wandb.finish()
+        import traceback
+        traceback.print_exc()
         return None, None, None
+    finally:
+        # Ensure the download run is closed if it's still open
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list, 
@@ -584,6 +640,10 @@ def main(args=None):
                     models["base"] = base_model
                     if tokenizer is None:
                         tokenizer = base_tokenizer
+        else:
+            print("⚠️  Warning: W&B artifact model failed to load, but will continue with other models")
+            # Even if wandb artifact failed, we might still have base model loaded
+            # So don't exit here, just log the warning
     
     # Validate that we have at least one model and tokenizer
     if len(models) == 0:
@@ -593,6 +653,8 @@ def main(args=None):
     if tokenizer is None:
         print("❌ No tokenizer available")
         sys.exit(1)
+    
+    print(f"\n✅ Successfully loaded {len(models)} model(s): {list(models.keys())}")
     
     # Initialize W&B if logging requested (default: True, unless --no_wandb)
     if log_to_wandb:
