@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 from transformers import AutoTokenizer
 from dylo_moe.model import DyLoRA_MoE
+from tqdm import tqdm
 
 
 class BaseBenchmark(ABC):
@@ -32,8 +33,15 @@ class BaseBenchmark(ABC):
         """Compute final benchmark metrics from all results."""
         pass
     
-    def generate_completion(self, model, prompt: str, **generation_kwargs) -> str:
-        """Generate code completion for a given prompt."""
+    def generate_completion(self, model, prompt: str, **generation_kwargs) -> tuple[str, dict]:
+        """Generate code completion for a given prompt.
+        
+        Returns:
+            tuple: (completion_text, metadata_dict) where metadata includes:
+                - truncated: bool indicating if generation hit max_new_tokens limit
+                - num_tokens: int number of tokens generated
+                - prompt_tokens: int number of tokens in prompt
+        """
         # Default generation parameters
         default_kwargs = {
             'max_new_tokens': self.max_new_tokens,
@@ -48,6 +56,7 @@ class BaseBenchmark(ABC):
         # Tokenize input - use larger context for code generation
         # HumanEval prompts can be long (docstrings + function signatures)
         inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        prompt_tokens = inputs['input_ids'].shape[1]
         
         # Move to model's device
         device = next(model.parameters()).device
@@ -62,9 +71,29 @@ class BaseBenchmark(ABC):
                 # Standard model generation
                 outputs = model.generate(**inputs, **default_kwargs)
         
+        # Calculate generated tokens
+        total_tokens = outputs.shape[1]
+        generated_tokens = total_tokens - prompt_tokens
+        
+        # Check if truncated (hit max_new_tokens limit)
+        # Generation is truncated if we generated exactly max_new_tokens and didn't hit EOS
+        truncated = generated_tokens >= default_kwargs['max_new_tokens']
+        if truncated:
+            # Double-check: if last token is EOS, it wasn't actually truncated
+            last_token = outputs[0, -1].item()
+            if last_token == self.tokenizer.eos_token_id:
+                truncated = False
+        
         # Decode and extract completion
         generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         completion = generated_text[len(prompt):].strip()
+        
+        # Create metadata
+        metadata = {
+            'truncated': truncated,
+            'num_tokens': generated_tokens,
+            'prompt_tokens': prompt_tokens,
+        }
         
         # Debug: warn if completion is empty
         if not completion:
@@ -77,7 +106,7 @@ class BaseBenchmark(ABC):
                 print(f"     Prompt length: {len(prompt)} chars, Generated length: {len(generated_text)} chars")
         
         model.train()
-        return completion
+        return completion, metadata
     
     def run_benchmark(self, model, max_samples: Optional[int] = None, 
                      log_to_wandb: bool = False, prefix: str = "") -> Dict[str, Any]:
@@ -97,7 +126,7 @@ class BaseBenchmark(ABC):
         
         # Evaluate each sample
         results = []
-        for i, sample in enumerate(dataset):
+        for i, sample in tqdm(enumerate(dataset)):
             try:
                 result = self.evaluate_sample(model, sample)
                 result['sample_index'] = i

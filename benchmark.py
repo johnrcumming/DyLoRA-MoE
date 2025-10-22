@@ -2,7 +2,7 @@
 """
 DyLoRA-MoE Benchmark Suite
 
-Comprehensive benchmarking system for generation models.
+Comprehensive benchmarking system for code generation models.
 Supports comparing base models with trained models (local or W&B artifacts).
 By default, results are logged to Weights & Biases (use --no_wandb to disable).
 
@@ -13,11 +13,14 @@ Usage:
     # Compare base model with W&B artifact (uses google/codegemma-2b by default)
     python benchmark.py --wandb_artifact "user/project/artifact:v0"
 
-    # Run only specific benchmarks with custom base model
-    python benchmark.py --benchmarks humaneval --model_name microsoft/DialoGPT-medium
+    # Run specific benchmarks with custom base model
+    python benchmark.py --benchmarks humaneval mbpp --model_name microsoft/DialoGPT-medium
 
-    # Full evaluation (all samples, uses default base model)
-    python benchmark.py --max_samples 164
+    # Run MBPP benchmark only
+    python benchmark.py --benchmarks mbpp --max_samples 100
+
+    # Full evaluation (all samples, all benchmarks, uses default base model)
+    python benchmark.py --max_samples 500
 
     # Quick test (subset, disable W&B logging, uses default base model)
     python benchmark.py --max_samples 20 --no_wandb
@@ -36,7 +39,24 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dylo_moe.model import DyLoRA_MoE
+from dylo_moe.device_utils import get_device_map, get_torch_dtype, print_device_info
 from benchmarks.humaneval_benchmark import HumanEvalBenchmark
+from benchmarks.humanevalplus_benchmark import HumanEvalPlusBenchmark
+from benchmarks.mbpp_benchmark import MBPPBenchmark
+
+# Global dtype override (set by command-line flags)
+_dtype_override: Optional[str] = None
+
+
+def set_dtype_override(dtype: Optional[str]):
+    """Set the global dtype override for all model loading."""
+    global _dtype_override
+    _dtype_override = dtype
+
+
+def _get_torch_dtype():
+    """Get torch dtype with global override applied."""
+    return get_torch_dtype(_dtype_override)
 
 
 def get_base_model_from_config(model_path: str) -> Optional[str]:
@@ -71,8 +91,8 @@ def load_base_model(model_name: str, hf_token: Optional[str] = None):
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             token=hf_token,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if torch.cuda.is_available() else None
+            torch_dtype=_get_torch_dtype(),
+            device_map=get_device_map()
         )
         
         print(f"✓ Base model loaded: {model_name}")
@@ -188,8 +208,8 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                         base_model = AutoModelForCausalLM.from_pretrained(
                             effective_base_model,
                             token=hf_token,
-                            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                            device_map="auto" if torch.cuda.is_available() else "cpu",
+                            torch_dtype=_get_torch_dtype(),
+                            device_map=get_device_map(),
                             low_cpu_mem_usage=True
                         )
                         
@@ -261,8 +281,8 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                     try:
                         model = AutoModelForCausalLM.from_pretrained(
                             model_path,
-                            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                            device_map="auto" if torch.cuda.is_available() else "cpu",
+                            torch_dtype=_get_torch_dtype(),
+                            device_map=get_device_map(),
                             low_cpu_mem_usage=True,
                             trust_remote_code=True  # In case there are custom components
                         )
@@ -281,8 +301,8 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                             model = AutoModelForCausalLM.from_pretrained(
                                 effective_base_model,
                                 token=hf_token,
-                                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                                device_map="auto" if torch.cuda.is_available() else "cpu",
+                                torch_dtype=_get_torch_dtype(),
+                                device_map=get_device_map(),
                                 low_cpu_mem_usage=True
                             )
                             
@@ -321,8 +341,8 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
             from peft import AutoPeftModelForCausalLM
             model = AutoPeftModelForCausalLM.from_pretrained(
                 model_path,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None
+                torch_dtype=_get_torch_dtype(),
+                device_map=get_device_map()
             )
             
             # Get tokenizer if not provided
@@ -354,11 +374,11 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
             # Load model with increased robustness
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
-                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else "cpu",
+                torch_dtype=_get_torch_dtype(),
+                device_map=get_device_map(),
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
-                offload_folder="./offload" if not torch.cuda.is_available() else None
+                offload_folder="./offload" if get_device_map() is None else None
             )
             
             print("✓ Loaded as regular AutoModelForCausalLM")
@@ -445,7 +465,9 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
     
     # Initialize available benchmarks
     available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=256)
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=512),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=512),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=512)
     }
     
     # Validate requested benchmarks
@@ -565,7 +587,9 @@ def parse_args(argv=None):
                "  python benchmark.py --wandb_artifact user/project/model:v0 --max_samples 164\n"
                "  python benchmark.py --trained_model ./results/best_model --max_samples 50\n"
                "  python benchmark.py --model_name microsoft/phi-2 --trained_model ./results/best_model\n"
-               "  python benchmark.py --wandb_artifact user/project/model:v0 --no_wandb  # Disable W&B logging\n",
+               "  python benchmark.py --wandb_artifact user/project/model:v0 --no_wandb  # Disable W&B logging\n"
+               "  python benchmark.py --max_samples 20 --bf16  # Force bfloat16 precision\n"
+               "  python benchmark.py --max_samples 20 --fp16  # Force float16 precision\n",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
@@ -579,7 +603,7 @@ def parse_args(argv=None):
     
     # Benchmark arguments
     parser.add_argument("--benchmarks", type=str, nargs="+", default=["humaneval"],
-                       help="Benchmarks to run (default: humaneval)")
+                       help="Benchmarks to run: humaneval, humanevalplus, mbpp (default: humaneval)")
     parser.add_argument("--max_samples", type=int, default=None,
                        help="Maximum samples per benchmark (default: all)")
     
@@ -591,6 +615,12 @@ def parse_args(argv=None):
     parser.add_argument("--no_wandb", action="store_true",
                        help="Disable W&B logging (default: enabled)")
     
+    # Precision arguments
+    parser.add_argument("--fp16", action="store_true",
+                       help="Force float16 precision (default: auto-detect based on device)")
+    parser.add_argument("--bf16", action="store_true",
+                       help="Force bfloat16 precision (default: auto-detect based on device)")
+    
     return parser.parse_args(argv)
 
 
@@ -598,6 +628,24 @@ def main(args=None):
     """Main benchmark function. Can be called with pre-parsed args or will parse from command line."""
     if args is None:
         args = parse_args()
+    
+    # Handle precision flags
+    if args.fp16 and args.bf16:
+        print("❌ Error: Cannot specify both --fp16 and --bf16")
+        sys.exit(1)
+    
+    dtype_override = None
+    if args.fp16:
+        dtype_override = 'fp16'
+        set_dtype_override('fp16')
+        print("ℹ️  Forcing float16 precision")
+    elif args.bf16:
+        dtype_override = 'bf16'
+        set_dtype_override('bf16')
+        print("ℹ️  Forcing bfloat16 precision")
+    
+    # Print device info at startup (with dtype override applied)
+    print_device_info(dtype_override)
     
     # Validate arguments
     if not args.wandb_artifact and not args.trained_model:

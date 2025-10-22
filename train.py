@@ -23,6 +23,7 @@ from typing import Union, Dict, Iterable, Any
 
 from dylo_moe.model import DyLoRA_MoE
 from dylo_moe.utils import print_trainable_parameters, save_dylo_moe_state, save_lora_experts
+from dylo_moe.device_utils import move_model_to_device, print_device_info
 from data.prepare_data import (
     download_mbpp, 
     download_code_alpaca,
@@ -681,14 +682,7 @@ def main(args):
         mbpp_dataset = secondary_dataset  # For backwards compatibility
     
     # Move model to GPU if available (needed for baseline evaluation)
-    if torch.cuda.is_available():
-        model = model.cuda()
-        print("✓ Model moved to CUDA")
-    elif torch.backends.mps.is_available():
-        model = model.to('mps')
-        print("✓ Model moved to MPS")
-    else:
-        print("ℹ Model on CPU")
+    model = move_model_to_device(model, verbose=True)
     
     # Baseline: Evaluate base model (before LoRA training) on HumanEval
     print("\n" + "="*80)
@@ -700,10 +694,16 @@ def main(args):
         model, tokenizer, humaneval_dataset, use_test_execution=True
     )
     
+    # Extract full metrics including truncation stats
+    baseline_metrics = baseline_results.get('full_metrics', {})
+    
     wandb.log({
         "baseline/humaneval_pass@1": baseline_results['pass@1_approx'],
         "baseline/humaneval_with_entry_point": baseline_results['num_with_entry_point'],
         "baseline/num_samples": baseline_results['num_samples'],
+        "baseline/truncation_rate": baseline_metrics.get('truncation_rate', 0.0),
+        "baseline/avg_tokens_generated": baseline_metrics.get('avg_tokens_generated', 0.0),
+        "baseline/avg_prompt_tokens": baseline_metrics.get('avg_prompt_tokens', 0.0),
     }, commit=False)
     
     print(f"\n✓ Baseline HumanEval Pass@1 (approx): {baseline_results['pass@1_approx']:.2%}")
@@ -907,10 +907,16 @@ def main(args):
         model, tokenizer, humaneval_dataset, use_test_execution=True
     )
     
+    # Extract full metrics including truncation stats
+    final_metrics = final_humaneval_results.get('full_metrics', {})
+    
     wandb.log({
         "final_humaneval_loss": final_eval['eval_loss'],
         "final_humaneval_pass@1": final_humaneval_results['pass@1_approx'],
         "final_humaneval_with_entry_point": final_humaneval_results['num_with_entry_point'],
+        "final_humaneval_truncation_rate": final_metrics.get('truncation_rate', 0.0),
+        "final_humaneval_avg_tokens_generated": final_metrics.get('avg_tokens_generated', 0.0),
+        "final_humaneval_syntax_score": final_metrics.get('syntax_score', 0.0),
     }, commit=False)
 
     # 9. Save the best model

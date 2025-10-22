@@ -1,31 +1,33 @@
 """
-HumanEval benchmark implementation for evaluating code generation models.
+HumanEval+ benchmark implementation for evaluating code generation models.
+HumanEval+ is an enhanced version of HumanEval with more comprehensive test cases.
 """
 import os
 import re
 import subprocess
 import tempfile
-import signal
+import sys
 from typing import Dict, Any, List
 from .base_benchmark import BaseBenchmark
-from data.prepare_data import download_humaneval
+from datasets import load_dataset
 
 
-class HumanEvalBenchmark(BaseBenchmark):
-    """HumanEval benchmark for code generation evaluation."""
+class HumanEvalPlusBenchmark(BaseBenchmark):
+    """HumanEval+ benchmark for code generation evaluation with enhanced test coverage."""
     
     def __init__(self, tokenizer, max_new_tokens: int = 512, timeout_seconds: int = 10, 
                  use_test_execution: bool = True):
-        super().__init__("HumanEval", tokenizer, max_new_tokens)
+        super().__init__("HumanEval+", tokenizer, max_new_tokens)
         self.timeout_seconds = timeout_seconds
         self.use_test_execution = use_test_execution
     
     def load_dataset(self) -> List[Dict[str, Any]]:
-        """Load the HumanEval dataset."""
-        return list(download_humaneval())
+        """Load the HumanEval+ dataset."""
+        dataset = load_dataset("evalplus/humanevalplus", split="test")
+        return list(dataset)
     
     def evaluate_sample(self, model, sample: Dict[str, Any]) -> Dict[str, Any]:
-        """Evaluate a single HumanEval sample."""
+        """Evaluate a single HumanEval+ sample."""
         task_id = sample.get('task_id', 'unknown')
         prompt = sample.get('prompt', '')
         canonical_solution = sample.get('canonical_solution', '')
@@ -86,7 +88,7 @@ class HumanEvalBenchmark(BaseBenchmark):
         }
     
     def compute_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Compute HumanEval metrics."""
+        """Compute HumanEval+ metrics."""
         successful_results = [r for r in results if r.get('success', True)]
         
         if not successful_results:
@@ -102,7 +104,7 @@ class HumanEvalBenchmark(BaseBenchmark):
                 'avg_prompt_tokens': 0.0,
             }
         
-        # Pass@1: Tests that actually pass
+        # Pass@1: Tests that actually pass (stricter in HumanEval+ due to more tests)
         test_passed = sum(1 for r in successful_results if r.get('test_passed', False))
         pass_at_1 = test_passed / len(successful_results)
         
@@ -190,20 +192,26 @@ class HumanEvalBenchmark(BaseBenchmark):
                 continue
             
             # Determine indentation
-            current_indent = len(line) - len(line.lstrip())
+            stripped = line.lstrip()
+            indent = len(line) - len(stripped)
             
-            if base_indent is None and line.strip().startswith('def'):
-                base_indent = current_indent
+            # First line with content sets the base indent
+            if base_indent is None:
+                base_indent = indent
                 function_lines.append(line)
-            elif base_indent is not None:
-                if current_indent > base_indent or line.strip().startswith((' ', '\t')):
-                    # Still inside function
-                    function_lines.append(line)
-                elif current_indent <= base_indent and line.strip() and not line.strip().startswith('#'):
-                    # Function ended
-                    break
-                else:
-                    function_lines.append(line)
+                continue
+            
+            # If we hit another function at same or less indentation, stop
+            if stripped.startswith('def ') and indent <= base_indent:
+                break
+            
+            # If indentation is less than base and line has content, we're done
+            if indent < base_indent:
+                break
+            
+            # Otherwise, this line is part of the function
+            if in_function:
+                function_lines.append(line)
         
         return '\n'.join(function_lines)
     
@@ -243,13 +251,10 @@ except Exception as e:
                 if "TEST_PASSED" in result.stdout:
                     return True, None
                 else:
-                    error_msg = result.stderr or result.stdout or "Unknown execution error"
-                    return False, error_msg
+                    # Extract error message
+                    error_msg = result.stdout + result.stderr
+                    return False, error_msg[:200]  # Truncate long errors
                     
-            except subprocess.TimeoutExpired:
-                return False, f"Execution timeout ({self.timeout_seconds}s)"
-            except Exception as e:
-                return False, f"Execution error: {e}"
             finally:
                 # Clean up temp file
                 try:
@@ -257,15 +262,13 @@ except Exception as e:
                 except:
                     pass
                     
+        except subprocess.TimeoutExpired:
+            return False, f"Timeout after {self.timeout_seconds}s"
         except Exception as e:
-            return False, f"Test setup error: {e}"
+            return False, f"Execution error: {str(e)}"
     
     def _indent_code(self, code: str, spaces: int) -> str:
         """Add indentation to code."""
         indent = ' ' * spaces
         return '\n'.join(indent + line if line.strip() else line 
                         for line in code.split('\n'))
-
-
-# Import sys for subprocess
-import sys
