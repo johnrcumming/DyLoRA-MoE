@@ -1,0 +1,127 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'Dockerfile'
+      - 'requirements.txt'
+      - 'dylo_moe/**'
+      - 'data/**'
+      - 'benchmarks/**'
+      - 'train.py'
+      - 'entrypoint.py'
+      - 'build_and_push.py'
+      - '.github/workflows/docker-build-push.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile'
+      - 'requirements.txt'
+  workflow_dispatch:
+    inputs:
+      push_to_registries:
+        description: 'Push to registries (or just build)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write  # Required for GCP Workload Identity Federation
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git hash
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # Authenticate to Docker Hub
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request' && (github.event.inputs.push_to_registries != 'false')
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      
+      # Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud
+        if: github.event_name != 'pull_request' && (github.event.inputs.push_to_registries != 'false')
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+      
+      - name: Set up Cloud SDK
+        if: github.event_name != 'pull_request' && (github.event.inputs.push_to_registries != 'false')
+        uses: google-github-actions/setup-gcloud@v2
+      
+      - name: Configure Docker for GCP Artifact Registry
+        if: github.event_name != 'pull_request' && (github.event.inputs.push_to_registries != 'false')
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      
+      # Set environment variables
+      - name: Set environment variables
+        run: |
+          echo "GIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}" >> $GITHUB_ENV
+      
+      # Build and push using build_and_push.py
+      - name: Build Docker image (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          python build_and_push.py --build-only
+      
+      - name: Build and push Docker images
+        if: github.event_name != 'pull_request' && (github.event.inputs.push_to_registries != 'false')
+        run: |
+          python build_and_push.py
+      
+      - name: Build Docker images (manual - no push)
+        if: github.event.inputs.push_to_registries == 'false'
+        run: |
+          python build_and_push.py --build-only
+      
+      # Summary
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Git Hash:** \`${{ env.GIT_HASH }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Event:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "- **Action:** Build only (no push)" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ github.event.inputs.push_to_registries }}" = "false" ]; then
+            echo "- **Action:** Build only (manual - no push)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Action:** Build and push to registries" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Pushed Images:" >> $GITHUB_STEP_SUMMARY
+            echo "**GCP Artifact Registry:**" >> $GITHUB_STEP_SUMMARY
+            echo "- \`us-central1-docker.pkg.dev/dylora/dy-lora-training-repo/dy-lora-training-image:${{ env.GIT_HASH }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`us-central1-docker.pkg.dev/dylora/dy-lora-training-repo/dy-lora-training-image:latest\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Docker Hub:**" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${{ secrets.DOCKER_HUB_USERNAME }}/dylora-moe:${{ env.GIT_HASH }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${{ secrets.DOCKER_HUB_USERNAME }}/dylora-moe:latest\`" >> $GITHUB_STEP_SUMMARY
+          fi

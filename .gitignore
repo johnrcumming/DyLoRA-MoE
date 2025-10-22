@@ -24,3 +24,6 @@ peft_test.py
 dylora-ece7d9f1337d.json
 # Environment variables
 .env
+
+docker_token.txt
+hf_token.txt
