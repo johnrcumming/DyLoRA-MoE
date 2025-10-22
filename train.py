@@ -24,6 +24,9 @@ from typing import Union, Dict, Iterable, Any
 from dylo_moe.model import DyLoRA_MoE
 from dylo_moe.utils import print_trainable_parameters, save_dylo_moe_state, save_lora_experts
 from dylo_moe.device_utils import move_model_to_device, print_device_info
+from benchmarks.humaneval_benchmark import HumanEvalBenchmark
+from benchmarks.humanevalplus_benchmark import HumanEvalPlusBenchmark
+from benchmarks.mbpp_benchmark import MBPPBenchmark
 from data.prepare_data import (
     download_mbpp, 
     download_code_alpaca,
@@ -441,65 +444,83 @@ def preprocess_training_dataset(tokenizer, skill_data, pack=True):
         dataset = Dataset.from_dict({"input_ids": tokenized_data.input_ids, "attention_mask": tokenized_data.attention_mask, "labels": tokenized_data.input_ids})
     return dataset
 
-def evaluate_humaneval(model, tokenizer, humaneval_dataset, max_samples=None, use_test_execution=False):
+
+def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use_test_execution=True, log_prefix=""):
     """
-    Evaluate model on HumanEval benchmark using the new benchmark system.
+    Run multiple benchmarks on a model and return aggregated results.
     
     Args:
         model: Model to evaluate
         tokenizer: Tokenizer for the model
-        humaneval_dataset: HumanEval dataset (for compatibility, not used directly)
-        max_samples: Maximum number of samples to evaluate
+        benchmark_names: List of benchmark names to run (e.g., ['humaneval', 'humanevalplus', 'mbpp'])
+        max_samples: Maximum number of samples to evaluate per benchmark
         use_test_execution: If True, use actual test execution for Pass@1 (slower but accurate)
+        log_prefix: Prefix for logging (e.g., "baseline", "final")
     
     Returns:
-        dict: Contains 'pass@1' score and generation samples
+        dict: Contains results for each benchmark with metrics and samples
     """
-    from benchmarks.humaneval_benchmark import HumanEvalBenchmark
-    
-    print("\n--- Evaluating on HumanEval Benchmark ---")
-    
-    # Create benchmark instance
-    benchmark = HumanEvalBenchmark(
-        tokenizer=tokenizer,
-        max_new_tokens=512,  # Increased to allow complete function generation
-        timeout_seconds=10,
-        use_test_execution=use_test_execution
-    )
-    
-    # Run benchmark
-    result = benchmark.run_benchmark(
-        model=model,
-        max_samples=max_samples,
-        log_to_wandb=False,  # Don't log to wandb during training (handled separately)
-        prefix="training"
-    )
-    
-    # Extract metrics for compatibility with existing code
-    metrics = result['metrics']
-    
-    # Map new metrics to old format for backward compatibility
-    pass_at_1 = metrics.get('pass@1', metrics.get('entry_point_score', 0.0))
-    
-    results = {
-        'pass@1_approx': pass_at_1,
-        'num_samples': metrics.get('total_samples', 0),
-        'num_with_entry_point': int(metrics.get('entry_point_score', 0.0) * metrics.get('total_samples', 0)),
-        'sample_generations': result.get('samples', [])[:5],  # First 5 for inspection
-        'full_metrics': metrics,  # Include all metrics from new system
+    # Initialize available benchmarks
+    available_benchmarks = {
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=512, timeout_seconds=10, use_test_execution=use_test_execution),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=512, timeout_seconds=10, use_test_execution=use_test_execution),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=512, timeout_seconds=10, use_test_execution=use_test_execution)
     }
     
-    print(f"HumanEval Pass@1: {pass_at_1:.2%}")
-    if use_test_execution:
-        print(f"  - Test execution Pass@1: {metrics.get('pass@1', 0.0):.2%}")
-        print(f"  - Syntax score: {metrics.get('syntax_score', 0.0):.2%}")
-        print(f"  - Entry point score: {metrics.get('entry_point_score', 0.0):.2%}")
-    else:
-        print(f"  - Entry point heuristic: {metrics.get('entry_point_score', 0.0):.2%}")
+    # Validate requested benchmarks
+    for benchmark_name in benchmark_names:
+        if benchmark_name not in available_benchmarks:
+            print(f"⚠️  Warning: Unknown benchmark '{benchmark_name}'. Available: {list(available_benchmarks.keys())}")
+            print(f"   Skipping '{benchmark_name}'")
     
-    return results
-
-    print()
+    # Filter to only valid benchmarks
+    valid_benchmarks = [b for b in benchmark_names if b in available_benchmarks]
+    
+    if not valid_benchmarks:
+        print("❌ No valid benchmarks to run")
+        return {}
+    
+    print(f"\n{'='*80}")
+    print(f"Running Benchmark Suite: {', '.join(valid_benchmarks)}")
+    if log_prefix:
+        print(f"Stage: {log_prefix}")
+    print(f"Max samples per benchmark: {max_samples or 'all'}")
+    print(f"Test execution: {'enabled' if use_test_execution else 'disabled (heuristic only)'}")
+    print(f"{'='*80}")
+    
+    all_results = {}
+    
+    for benchmark_name in valid_benchmarks:
+        benchmark = available_benchmarks[benchmark_name]
+        
+        print(f"\n--- Running {benchmark_name.upper()} Benchmark ---")
+        
+        # Run benchmark
+        result = benchmark.run_benchmark(
+            model=model,
+            max_samples=max_samples,
+            log_to_wandb=False,  # We'll log manually to wandb in the calling function
+            prefix=log_prefix
+        )
+        
+        all_results[benchmark_name] = result
+        
+        # Print summary for this benchmark
+        metrics = result['metrics']
+        print(f"\n{benchmark_name.upper()} Results:")
+        print(f"  Pass@1: {metrics.get('pass@1', 0.0):.2%}")
+        print(f"  Syntax Score: {metrics.get('syntax_score', 0.0):.2%}")
+        print(f"  Entry Point Score: {metrics.get('entry_point_score', 0.0):.2%}")
+        if use_test_execution:
+            print(f"  Tests Passed: {metrics.get('tests_passed', 0)}/{metrics.get('tests_run', 0)}")
+        print(f"  Truncation Rate: {metrics.get('truncation_rate', 0.0):.2%}")
+        print(f"  Avg Tokens Generated: {metrics.get('avg_tokens_generated', 0.0):.1f}")
+    
+    print(f"\n{'='*80}")
+    print(f"Benchmark Suite Complete")
+    print(f"{'='*80}\n")
+    
+    return all_results
 
 
 def get_optimal_lr_config(args):
@@ -689,25 +710,30 @@ def main(args):
     print("BASELINE EVALUATION: Base Model (Before LoRA Training)")
     print("="*80)
     
-    # Evaluate base model's code generation capability 
-    baseline_results = evaluate_humaneval(
-        model, tokenizer, humaneval_dataset, use_test_execution=True
+    # Run benchmark suite on base model
+    baseline_results = run_benchmark_suite(
+        model=model,
+        tokenizer=tokenizer,
+        benchmark_names=args.benchmarks,
+        max_samples=None,  # Run on full benchmark datasets
+        use_test_execution=True,
+        log_prefix="baseline"
     )
     
-    # Extract full metrics including truncation stats
-    baseline_metrics = baseline_results.get('full_metrics', {})
+    # Log results to wandb for each benchmark
+    for benchmark_name, result in baseline_results.items():
+        metrics = result['metrics']
+        wandb.log({
+            f"baseline/{benchmark_name}_pass@1": metrics.get('pass@1', 0.0),
+            f"baseline/{benchmark_name}_syntax_score": metrics.get('syntax_score', 0.0),
+            f"baseline/{benchmark_name}_entry_point_score": metrics.get('entry_point_score', 0.0),
+            f"baseline/{benchmark_name}_truncation_rate": metrics.get('truncation_rate', 0.0),
+            f"baseline/{benchmark_name}_avg_tokens_generated": metrics.get('avg_tokens_generated', 0.0),
+            f"baseline/{benchmark_name}_tests_passed": metrics.get('tests_passed', 0),
+            f"baseline/{benchmark_name}_tests_run": metrics.get('tests_run', 0),
+        }, commit=False)
     
-    wandb.log({
-        "baseline/humaneval_pass@1": baseline_results['pass@1_approx'],
-        "baseline/humaneval_with_entry_point": baseline_results['num_with_entry_point'],
-        "baseline/num_samples": baseline_results['num_samples'],
-        "baseline/truncation_rate": baseline_metrics.get('truncation_rate', 0.0),
-        "baseline/avg_tokens_generated": baseline_metrics.get('avg_tokens_generated', 0.0),
-        "baseline/avg_prompt_tokens": baseline_metrics.get('avg_prompt_tokens', 0.0),
-    }, commit=False)
-    
-    print(f"\n✓ Baseline HumanEval Pass@1 (approx): {baseline_results['pass@1_approx']:.2%}")
-    print(f"✓ Baseline generations with entry point: {baseline_results['num_with_entry_point']}/{baseline_results['num_samples']}")
+    print("\n✓ Baseline evaluation complete")
     print("="*80 + "\n")
     
     # Prepare training data from loaded datasets
@@ -895,29 +921,54 @@ def main(args):
     
     trainer.train(resume_from_checkpoint=resume_checkpoint)
 
-    # 8. Final evaluation on HumanEval Benchmark (after training)
-    print("\n--- Final Evaluation on HumanEval Benchmark ---")
-    # Swap to HumanEval for final benchmark
-    trainer.eval_dataset = humaneval_benchmark
-    final_eval = trainer.evaluate(metric_key_prefix="eval")
-    print(f"Final HumanEval Loss: {final_eval['eval_loss']:.4f}")
+    # 8. Final evaluation on Benchmark Suite (after training)
+    print("\n" + "="*80)
+    print("FINAL EVALUATION: Trained Model (After LoRA Training)")
+    print("="*80)
     
-    # Evaluate HumanEval code generation (use actual test execution for final evaluation)
-    final_humaneval_results = evaluate_humaneval(
-        model, tokenizer, humaneval_dataset, use_test_execution=True
+    # Run benchmark suite on trained model
+    final_results = run_benchmark_suite(
+        model=model,
+        tokenizer=tokenizer,
+        benchmark_names=args.benchmarks,
+        max_samples=None,  # Run on full benchmark datasets
+        use_test_execution=True,
+        log_prefix="final"
     )
     
-    # Extract full metrics including truncation stats
-    final_metrics = final_humaneval_results.get('full_metrics', {})
+    # Log results to wandb for each benchmark
+    for benchmark_name, result in final_results.items():
+        metrics = result['metrics']
+        wandb.log({
+            f"final/{benchmark_name}_pass@1": metrics.get('pass@1', 0.0),
+            f"final/{benchmark_name}_syntax_score": metrics.get('syntax_score', 0.0),
+            f"final/{benchmark_name}_entry_point_score": metrics.get('entry_point_score', 0.0),
+            f"final/{benchmark_name}_truncation_rate": metrics.get('truncation_rate', 0.0),
+            f"final/{benchmark_name}_avg_tokens_generated": metrics.get('avg_tokens_generated', 0.0),
+            f"final/{benchmark_name}_tests_passed": metrics.get('tests_passed', 0),
+            f"final/{benchmark_name}_tests_run": metrics.get('tests_run', 0),
+        }, commit=False)
     
-    wandb.log({
-        "final_humaneval_loss": final_eval['eval_loss'],
-        "final_humaneval_pass@1": final_humaneval_results['pass@1_approx'],
-        "final_humaneval_with_entry_point": final_humaneval_results['num_with_entry_point'],
-        "final_humaneval_truncation_rate": final_metrics.get('truncation_rate', 0.0),
-        "final_humaneval_avg_tokens_generated": final_metrics.get('avg_tokens_generated', 0.0),
-        "final_humaneval_syntax_score": final_metrics.get('syntax_score', 0.0),
-    }, commit=False)
+    # Also evaluate loss on the first benchmark dataset for compatibility
+    if args.benchmarks and len(args.benchmarks) > 0:
+        first_benchmark = args.benchmarks[0]
+        # Map benchmark names to dataset variables
+        benchmark_dataset_map = {
+            'humaneval': humaneval_benchmark,
+            'humanevalplus': humaneval_benchmark,  # HumanEval+ uses same underlying data
+            'mbpp': get_dataset('mbpp', with_validation=True)['validation']  # Use MBPP validation
+        }
+        
+        if first_benchmark in benchmark_dataset_map:
+            trainer.eval_dataset = benchmark_dataset_map[first_benchmark]
+            final_eval = trainer.evaluate(metric_key_prefix="eval")
+            print(f"\nFinal {first_benchmark.upper()} Loss: {final_eval['eval_loss']:.4f}")
+            wandb.log({
+                f"final/{first_benchmark}_loss": final_eval['eval_loss'],
+            }, commit=False)
+    
+    print("\n✓ Final evaluation complete")
+    print("="*80 + "\n")
 
     # 9. Save the best model
     print("\n--- Saving Best Model ---")
@@ -1018,6 +1069,8 @@ def parse_args(argv=None):
              "python_code_instructions_18k, python_code_23k_sharegpt. "
              "Example: --datasets 'code_alpaca,mbpp,evol_instruct'"
     )
+    parser.add_argument("--benchmarks", type=str, nargs="+", default=["humaneval"],
+                       help="Benchmarks to run for baseline and final evaluation: humaneval, humanevalplus, mbpp (default: humaneval)")
     return parser.parse_args(argv)
 
 
