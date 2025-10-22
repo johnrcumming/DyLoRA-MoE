@@ -293,6 +293,80 @@ class DyLoRAMonitoringCallback(TrainerCallback):
                     }, step=state.global_step)
 
 
+def analyze_truncation_stats(texts, tokenizer, max_length=768, dataset_name="Dataset"):
+    """
+    Analyze and report truncation statistics for a dataset.
+    
+    Args:
+        texts: List of text strings
+        tokenizer: Tokenizer to use
+        max_length: Maximum sequence length
+        dataset_name: Name for reporting
+    """
+    print(f"\n--- Truncation Analysis: {dataset_name} ---")
+    
+    token_lengths = []
+    truncated_count = 0
+    
+    for text in texts:
+        tokens = tokenizer(text, add_special_tokens=True)['input_ids']
+        token_len = len(tokens)
+        token_lengths.append(token_len)
+        if token_len > max_length:
+            truncated_count += 1
+    
+    truncation_rate = truncated_count / len(texts) if len(texts) > 0 else 0
+    avg_length = sum(token_lengths) / len(token_lengths) if token_lengths else 0
+    max_seq_length = max(token_lengths) if token_lengths else 0
+    min_seq_length = min(token_lengths) if token_lengths else 0
+    
+    # Calculate percentiles
+    sorted_lengths = sorted(token_lengths)
+    p50 = sorted_lengths[len(sorted_lengths) // 2] if sorted_lengths else 0
+    p75 = sorted_lengths[int(len(sorted_lengths) * 0.75)] if sorted_lengths else 0
+    p90 = sorted_lengths[int(len(sorted_lengths) * 0.90)] if sorted_lengths else 0
+    p95 = sorted_lengths[int(len(sorted_lengths) * 0.95)] if sorted_lengths else 0
+    p99 = sorted_lengths[int(len(sorted_lengths) * 0.99)] if sorted_lengths else 0
+    
+    print(f"Total samples: {len(texts)}")
+    print(f"Max length setting: {max_length} tokens")
+    print(f"")
+    print(f"Token length statistics:")
+    print(f"  Average: {avg_length:.1f} tokens")
+    print(f"  Min: {min_seq_length} tokens")
+    print(f"  Max: {max_seq_length} tokens")
+    print(f"  Median (p50): {p50} tokens")
+    print(f"  p75: {p75} tokens")
+    print(f"  p90: {p90} tokens")
+    print(f"  p95: {p95} tokens")
+    print(f"  p99: {p99} tokens")
+    print(f"")
+    print(f"Truncation:")
+    print(f"  Truncated samples: {truncated_count}/{len(texts)} ({truncation_rate:.1%})")
+    
+    if truncation_rate > 0.1:
+        print(f"  ⚠️  WARNING: {truncation_rate:.1%} of samples will be truncated!")
+        print(f"  Consider increasing max_length to {p95} (p95) or {p99} (p99)")
+    elif truncation_rate > 0.05:
+        print(f"  ⚠️  Note: {truncation_rate:.1%} of samples will be truncated")
+    else:
+        print(f"  ✓ Low truncation rate: {truncation_rate:.1%}")
+    
+    print("-" * 60)
+    
+    return {
+        'truncation_rate': truncation_rate,
+        'truncated_count': truncated_count,
+        'avg_length': avg_length,
+        'max_length': max_seq_length,
+        'p50': p50,
+        'p75': p75,
+        'p90': p90,
+        'p95': p95,
+        'p99': p99,
+    }
+
+
 def preprocess_evaluation_dataset(tokenizer, dataset):
     """
     Tokenizes the evaluation dataset.
@@ -304,12 +378,12 @@ def preprocess_evaluation_dataset(tokenizer, dataset):
         else:
             # The Code Alpaca dataset has 'instruction' and 'output' columns.
             processed_text = [f"{instruction}\n{output}" for instruction, output in zip(examples["instruction"], examples["output"])]
-        return tokenizer(processed_text, padding="max_length", truncation=True, max_length=512)
+        return tokenizer(processed_text, padding="max_length", truncation=True, max_length=768)
 
     tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset.column_names)
     return tokenized_dataset
 
-def pack_sequences(tokenizer, texts, max_length=512):
+def pack_sequences(tokenizer, texts, max_length=768):
     """Naive sequence packing: concatenate tokenized sequences until max_length reached."""
     input_ids_batches = []
     attn_batches = []
@@ -440,7 +514,7 @@ def preprocess_training_dataset(tokenizer, skill_data, pack=True):
         input_ids, attn = pack_sequences(tokenizer, skill_data)
         dataset = Dataset.from_dict({"input_ids": input_ids, "attention_mask": attn, "labels": input_ids})
     else:
-        tokenized_data = tokenizer(skill_data, padding=True, truncation=True, return_tensors="pt", max_length=512)
+        tokenized_data = tokenizer(skill_data, padding=True, truncation=True, return_tensors="pt", max_length=768)
         dataset = Dataset.from_dict({"input_ids": tokenized_data.input_ids, "attention_mask": tokenized_data.attention_mask, "labels": tokenized_data.input_ids})
     return dataset
 
@@ -460,11 +534,11 @@ def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use
     Returns:
         dict: Contains results for each benchmark with metrics and samples
     """
-    # Initialize available benchmarks
+    # Initialize available benchmarks with adaptive token limits enabled
     available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=512, timeout_seconds=10, use_test_execution=use_test_execution),
-        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=512, timeout_seconds=10, use_test_execution=use_test_execution),
-        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=512, timeout_seconds=10, use_test_execution=use_test_execution)
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=768, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=768, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=1024, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True)
     }
     
     # Validate requested benchmarks
@@ -862,11 +936,55 @@ def main(args):
     
     # Create training and validation datasets from the split
     print(f"\n--- Preparing Training and Validation Datasets ---")
+    
+    # Analyze truncation statistics before tokenization
+    print(f"\n{'='*80}")
+    print("TRUNCATION ANALYSIS")
+    print(f"{'='*80}")
+    train_stats = analyze_truncation_stats(train_data, tokenizer, max_length=768, dataset_name="Training Set")
+    val_stats = analyze_truncation_stats(val_data, tokenizer, max_length=768, dataset_name="Validation Set")
+    
+    # Log truncation stats to wandb
+    wandb.log({
+        "data_prep/train_truncation_rate": train_stats['truncation_rate'],
+        "data_prep/train_avg_length": train_stats['avg_length'],
+        "data_prep/train_p95_length": train_stats['p95'],
+        "data_prep/val_truncation_rate": val_stats['truncation_rate'],
+        "data_prep/val_avg_length": val_stats['avg_length'],
+        "data_prep/val_p95_length": val_stats['p95'],
+    }, commit=False)
+    
+    print(f"{'='*80}\n")
+    
     train_dataset = preprocess_training_dataset(tokenizer, train_data, pack=True)
     val_dataset = preprocess_evaluation_dataset(tokenizer, Dataset.from_dict({"text": val_data}))
     
     print(f"Training dataset: {len(train_dataset)} examples")
     print(f"Validation dataset: {len(val_dataset)} examples")
+    
+    # Exit early if --data_prep_only flag is set
+    if args.data_prep_only:
+        print(f"\n{'='*80}")
+        print("DATA PREPARATION COMPLETE")
+        print(f"{'='*80}")
+        print("\n✅ Data preparation completed successfully!")
+        print(f"   Training examples: {len(train_dataset)}")
+        print(f"   Validation examples: {len(val_dataset)}")
+        print(f"\n📊 Truncation Statistics Summary:")
+        print(f"   Training Set:")
+        print(f"      - Truncation Rate: {train_stats['truncation_rate']:.2%}")
+        print(f"      - Avg Length: {train_stats['avg_length']:.1f} tokens")
+        print(f"      - P95 Length: {train_stats['p95']:.0f} tokens")
+        print(f"   Validation Set:")
+        print(f"      - Truncation Rate: {val_stats['truncation_rate']:.2%}")
+        print(f"      - Avg Length: {val_stats['avg_length']:.1f} tokens")
+        print(f"      - P95 Length: {val_stats['p95']:.0f} tokens")
+        print(f"\n💡 To proceed with training, run without --data_prep_only flag")
+        print(f"{'='*80}\n")
+        
+        # Finish wandb run
+        wandb.finish()
+        return  # Exit main() function
     
     # Prepare HumanEval for benchmarking only (not for per-epoch evaluation)
     print(f"\n--- Preparing HumanEval Benchmark Dataset ---")
@@ -1071,6 +1189,8 @@ def parse_args(argv=None):
     )
     parser.add_argument("--benchmarks", type=str, nargs="+", default=["humaneval"],
                        help="Benchmarks to run for baseline and final evaluation: humaneval, humanevalplus, mbpp (default: humaneval)")
+    parser.add_argument("--data_prep_only", action="store_true",
+                       help="Only perform data preparation and report statistics (including truncation analysis), then exit without training.")
     return parser.parse_args(argv)
 
 

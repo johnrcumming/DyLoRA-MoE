@@ -14,9 +14,9 @@ from datasets import load_dataset
 class MBPPBenchmark(BaseBenchmark):
     """MBPP benchmark for code generation evaluation."""
     
-    def __init__(self, tokenizer, max_new_tokens: int = 512, timeout_seconds: int = 10, 
-                 use_test_execution: bool = True):
-        super().__init__("MBPP", tokenizer, max_new_tokens)
+    def __init__(self, tokenizer, max_new_tokens: int = 1024, timeout_seconds: int = 10, 
+                 use_test_execution: bool = True, use_adaptive_tokens: bool = True):
+        super().__init__("MBPP", tokenizer, max_new_tokens, use_adaptive_tokens)
         self.timeout_seconds = timeout_seconds
         self.use_test_execution = use_test_execution
     

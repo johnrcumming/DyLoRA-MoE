@@ -10,13 +10,68 @@ from dylo_moe.model import DyLoRA_MoE
 from tqdm import tqdm
 
 
+def get_adaptive_max_tokens(prompt: str, benchmark_name: str, 
+                            base_limit: int = None) -> int:
+    """
+    Calculate adaptive max_new_tokens based on prompt complexity.
+    
+    Args:
+        prompt: The input prompt text
+        benchmark_name: Name of benchmark (humaneval, humanevalplus, mbpp)
+        base_limit: Override default base limit for the benchmark
+    
+    Returns:
+        Adaptive max_new_tokens (min: 512, max: 2048)
+    """
+    # Default base limits per benchmark (based on empirical data)
+    default_limits = {
+        'humaneval': 768,
+        'humanevalplus': 768,
+        'mbpp': 1024
+    }
+    
+    # Use provided base_limit or fallback to benchmark default
+    if base_limit is not None:
+        limit = base_limit
+    else:
+        limit = default_limits.get(benchmark_name.lower(), 768)
+    
+    # Adjust based on prompt complexity
+    prompt_words = len(prompt.split())
+    
+    # Very long prompts likely indicate complex problems
+    if prompt_words > 200:
+        limit = min(int(limit * 1.5), 2048)
+    elif prompt_words > 150:
+        limit = min(int(limit * 1.3), 2048)
+    elif prompt_words > 100:
+        limit = min(int(limit * 1.2), 2048)
+    
+    # Check for complexity indicators
+    complexity_keywords = [
+        'implement', 'algorithm', 'data structure', 'class',
+        'recursive', 'dynamic programming', 'optimize',
+        'multiple', 'complex', 'advanced'
+    ]
+    complexity_score = sum(1 for kw in complexity_keywords if kw.lower() in prompt.lower())
+    if complexity_score >= 3:
+        limit = min(limit + 256, 2048)
+    
+    # Ensure minimum threshold
+    limit = max(limit, 512)
+    
+    return limit
+
+
 class BaseBenchmark(ABC):
     """Abstract base class for model benchmarks."""
     
-    def __init__(self, name: str, tokenizer: AutoTokenizer, max_new_tokens: int = 256):
+    def __init__(self, name: str, tokenizer: AutoTokenizer, max_new_tokens: int = 256, 
+                 use_adaptive_tokens: bool = True):
         self.name = name
         self.tokenizer = tokenizer
         self.max_new_tokens = max_new_tokens
+        self.use_adaptive_tokens = use_adaptive_tokens
         
     @abstractmethod
     def load_dataset(self) -> List[Dict[str, Any]]:
@@ -41,10 +96,17 @@ class BaseBenchmark(ABC):
                 - truncated: bool indicating if generation hit max_new_tokens limit
                 - num_tokens: int number of tokens generated
                 - prompt_tokens: int number of tokens in prompt
+                - adaptive_limit: int the max_new_tokens used (if adaptive)
         """
+        # Calculate adaptive token limit if enabled
+        if self.use_adaptive_tokens and 'max_new_tokens' not in generation_kwargs:
+            adaptive_limit = get_adaptive_max_tokens(prompt, self.name, self.max_new_tokens)
+        else:
+            adaptive_limit = generation_kwargs.get('max_new_tokens', self.max_new_tokens)
+        
         # Default generation parameters
         default_kwargs = {
-            'max_new_tokens': self.max_new_tokens,
+            'max_new_tokens': adaptive_limit,
             'temperature': 0.2,
             'do_sample': True,
             'top_p': 0.95,
@@ -93,6 +155,7 @@ class BaseBenchmark(ABC):
             'truncated': truncated,
             'num_tokens': generated_tokens,
             'prompt_tokens': prompt_tokens,
+            'adaptive_limit': adaptive_limit if self.use_adaptive_tokens else self.max_new_tokens,
         }
         
         # Debug: warn if completion is empty

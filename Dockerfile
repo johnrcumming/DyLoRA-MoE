@@ -4,6 +4,12 @@ FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel
 # Set the working directory in the container
 WORKDIR /app
 
+# copy and install requirements
+COPY requirements.txt /app/
+
+# Install any needed packages specified in requirements.txt
+RUN pip install -r /app/requirements.txt
+
 # Copy the current directory contents into the container at /app
 COPY dylo_moe/ /app/dylo_moe/
 COPY data/ /app/data/
@@ -11,10 +17,6 @@ COPY benchmarks/ /app/benchmarks/
 COPY train.py /app/
 COPY benchmark.py /app/
 COPY entrypoint.py /app/
-COPY requirements.txt /app/
-
-# Install any needed packages specified in requirements.txt
-RUN pip install -r /app/requirements.txt
 
 # Set the unified entrypoint
 ENTRYPOINT ["python", "entrypoint.py"]

@@ -463,11 +463,11 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
                   max_samples: Optional[int] = None, log_to_wandb: bool = False) -> Dict[str, Any]:
     """Run all specified benchmarks on all models."""
     
-    # Initialize available benchmarks
+    # Initialize available benchmarks with adaptive token limits enabled
     available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=512),
-        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=512),
-        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=512)
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=768, use_adaptive_tokens=True),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=768, use_adaptive_tokens=True),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=1024, use_adaptive_tokens=True)
     }
     
     # Validate requested benchmarks
