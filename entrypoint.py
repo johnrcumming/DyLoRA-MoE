@@ -133,6 +133,8 @@ def run_training(args):
         train.main(parsed_args)
         
         logger.info("✅ Training completed successfully")
+        logger.info("🛑 Shutting down container...")
+        sys.exit(0)  # Explicit successful exit
             
     except KeyboardInterrupt:
         logger.info("🛑 Training interrupted by user")
@@ -160,6 +162,8 @@ def run_benchmark(args):
         benchmark.main(parsed_args)
         
         logger.info("✅ Benchmarking completed successfully")
+        logger.info("🛑 Shutting down container...")
+        sys.exit(0)  # Explicit successful exit
             
     except KeyboardInterrupt:
         logger.info("🛑 Benchmarking interrupted by user")
