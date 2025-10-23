@@ -21,31 +21,32 @@ def get_adaptive_max_tokens(prompt: str, benchmark_name: str,
         base_limit: Override default base limit for the benchmark
     
     Returns:
-        Adaptive max_new_tokens (min: 512, max: 2048)
+        Adaptive max_new_tokens (min: 512, max: 4096)
     """
     # Default base limits per benchmark (based on empirical data)
+    # Significantly increased to handle truncation: HumanEval 34%, HumanEval+ 38%, MBPP 60%
     default_limits = {
-        'humaneval': 1536,      # Increased from 768 to reduce 38% truncation
-        'humanevalplus': 1536,  # Increased from 768 to reduce 33% truncation
-        'mbpp': 2048            # Increased from 1024 to reduce 62% truncation
+        'humaneval': 2048,      # Increased from 1536 (was 34% truncation @ avg 608 tokens)
+        'humanevalplus': 2048,  # Increased from 1536 (was 38% truncation @ avg 658 tokens)
+        'mbpp': 3072            # Increased from 2048 (was 60% truncation @ avg 1326 tokens)
     }
     
     # Use provided base_limit or fallback to benchmark default
     if base_limit is not None:
         limit = base_limit
     else:
-        limit = default_limits.get(benchmark_name.lower(), 768)
+        limit = default_limits.get(benchmark_name.lower(), 2048)
     
     # Adjust based on prompt complexity
     prompt_words = len(prompt.split())
     
     # Very long prompts likely indicate complex problems
     if prompt_words > 200:
-        limit = min(int(limit * 1.5), 2048)
+        limit = min(int(limit * 1.5), 4096)
     elif prompt_words > 150:
-        limit = min(int(limit * 1.3), 2048)
+        limit = min(int(limit * 1.3), 4096)
     elif prompt_words > 100:
-        limit = min(int(limit * 1.2), 2048)
+        limit = min(int(limit * 1.2), 4096)
     
     # Check for complexity indicators
     complexity_keywords = [
@@ -55,7 +56,7 @@ def get_adaptive_max_tokens(prompt: str, benchmark_name: str,
     ]
     complexity_score = sum(1 for kw in complexity_keywords if kw.lower() in prompt.lower())
     if complexity_score >= 3:
-        limit = min(limit + 256, 2048)
+        limit = min(limit + 512, 4096)
     
     # Ensure minimum threshold
     limit = max(limit, 512)
@@ -182,7 +183,7 @@ class BaseBenchmark(ABC):
         print(f"Base max_new_tokens: {self.max_new_tokens}")
         print(f"Adaptive tokens: {'enabled' if self.use_adaptive_tokens else 'disabled'}")
         if self.use_adaptive_tokens:
-            print(f"Adaptive range: 512-2048 tokens (adjusts per prompt complexity)")
+            print(f"Adaptive range: 512-4096 tokens (adjusts per prompt complexity)")
         
         # Load dataset
         dataset = self.load_dataset()

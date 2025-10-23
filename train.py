@@ -536,9 +536,9 @@ def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use
     """
     # Initialize available benchmarks with adaptive token limits enabled
     available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=1536, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
-        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=1536, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
-        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=2048, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True)
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=2048, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=2048, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=3072, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True)
     }
     
     # Validate requested benchmarks

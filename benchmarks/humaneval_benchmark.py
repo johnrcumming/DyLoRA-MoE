@@ -14,7 +14,7 @@ from data.prepare_data import download_humaneval
 class HumanEvalBenchmark(BaseBenchmark):
     """HumanEval benchmark for code generation evaluation."""
     
-    def __init__(self, tokenizer, max_new_tokens: int = 1536, timeout_seconds: int = 10, 
+    def __init__(self, tokenizer, max_new_tokens: int = 2048, timeout_seconds: int = 10, 
                  use_test_execution: bool = True, use_adaptive_tokens: bool = True):
         super().__init__("HumanEval", tokenizer, max_new_tokens, use_adaptive_tokens)
         self.timeout_seconds = timeout_seconds

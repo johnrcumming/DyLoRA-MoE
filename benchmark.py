@@ -465,9 +465,9 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
     
     # Initialize available benchmarks with adaptive token limits enabled
     available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=1536, use_adaptive_tokens=True),
-        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=1536, use_adaptive_tokens=True),
-        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=2048, use_adaptive_tokens=True)
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=2048, use_adaptive_tokens=True),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=2048, use_adaptive_tokens=True),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=3072, use_adaptive_tokens=True)
     }
     
     # Validate requested benchmarks

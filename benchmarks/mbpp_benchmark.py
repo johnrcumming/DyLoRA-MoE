@@ -14,7 +14,7 @@ from datasets import load_dataset
 class MBPPBenchmark(BaseBenchmark):
     """MBPP (Mostly Basic Programming Problems) benchmark."""
     
-    def __init__(self, tokenizer, max_new_tokens: int = 2048, timeout_seconds: int = 10,
+    def __init__(self, tokenizer, max_new_tokens: int = 3072, timeout_seconds: int = 10,
                  use_test_execution: bool = True, use_adaptive_tokens: bool = True):
         super().__init__("MBPP", tokenizer, max_new_tokens, use_adaptive_tokens)
         self.timeout_seconds = timeout_seconds
