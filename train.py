@@ -536,9 +536,9 @@ def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use
     """
     # Initialize available benchmarks with adaptive token limits enabled
     available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=768, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
-        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=768, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
-        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=1024, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True)
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=1536, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=1536, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=2048, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=True)
     }
     
     # Validate requested benchmarks
@@ -589,6 +589,7 @@ def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use
             print(f"  Tests Passed: {metrics.get('tests_passed', 0)}/{metrics.get('tests_run', 0)}")
         print(f"  Truncation Rate: {metrics.get('truncation_rate', 0.0):.2%}")
         print(f"  Avg Tokens Generated: {metrics.get('avg_tokens_generated', 0.0):.1f}")
+        print(f"  Max Token Limits: min={metrics.get('min_token_limit', 0):.0f}, avg={metrics.get('avg_token_limit', 0.0):.0f}, max={metrics.get('max_token_limit', 0):.0f}")
     
     print(f"\n{'='*80}")
     print(f"Benchmark Suite Complete")

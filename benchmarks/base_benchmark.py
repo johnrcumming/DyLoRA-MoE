@@ -25,9 +25,9 @@ def get_adaptive_max_tokens(prompt: str, benchmark_name: str,
     """
     # Default base limits per benchmark (based on empirical data)
     default_limits = {
-        'humaneval': 768,
-        'humanevalplus': 768,
-        'mbpp': 1024
+        'humaneval': 1536,      # Increased from 768 to reduce 38% truncation
+        'humanevalplus': 1536,  # Increased from 768 to reduce 33% truncation
+        'mbpp': 2048            # Increased from 1024 to reduce 62% truncation
     }
     
     # Use provided base_limit or fallback to benchmark default
@@ -179,6 +179,10 @@ class BaseBenchmark(ABC):
         if prefix:
             print(f"Model: {prefix}")
         print(f"{'='*80}")
+        print(f"Base max_new_tokens: {self.max_new_tokens}")
+        print(f"Adaptive tokens: {'enabled' if self.use_adaptive_tokens else 'disabled'}")
+        if self.use_adaptive_tokens:
+            print(f"Adaptive range: 512-2048 tokens (adjusts per prompt complexity)")
         
         # Load dataset
         dataset = self.load_dataset()

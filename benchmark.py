@@ -465,9 +465,9 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
     
     # Initialize available benchmarks with adaptive token limits enabled
     available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=768, use_adaptive_tokens=True),
-        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=768, use_adaptive_tokens=True),
-        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=1024, use_adaptive_tokens=True)
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=1536, use_adaptive_tokens=True),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=1536, use_adaptive_tokens=True),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=2048, use_adaptive_tokens=True)
     }
     
     # Validate requested benchmarks
@@ -557,6 +557,18 @@ def compare_results(results: Dict[str, Any], benchmarks: list):
                 else:
                     print(f"{value:>15}", end="")
             print()
+        
+        # Print token limit information
+        print("\nToken Generation Limits:")
+        print("-" * 80)
+        for model_name, metrics in model_metrics.items():
+            min_limit = metrics.get('min_token_limit', 0)
+            avg_limit = metrics.get('avg_token_limit', 0)
+            max_limit = metrics.get('max_token_limit', 0)
+            avg_generated = metrics.get('avg_tokens_generated', 0)
+            print(f"{model_name}:")
+            print(f"  Max token limits: min={min_limit:.0f}, avg={avg_limit:.0f}, max={max_limit:.0f}")
+            print(f"  Avg tokens generated: {avg_generated:.1f}")
         
         # Calculate improvements
         if len(model_metrics) == 2:
