@@ -14,8 +14,8 @@ from datasets import load_dataset
 class MBPPBenchmark(BaseBenchmark):
     """MBPP (Mostly Basic Programming Problems) benchmark."""
     
-    def __init__(self, tokenizer, max_new_tokens: int = 3072, timeout_seconds: int = 10,
-                 use_test_execution: bool = True, use_adaptive_tokens: bool = True):
+    def __init__(self, tokenizer, max_new_tokens: int = 4096, timeout_seconds: int = 10,
+                 use_test_execution: bool = True, use_adaptive_tokens: bool = False):
         super().__init__("MBPP", tokenizer, max_new_tokens, use_adaptive_tokens)
         self.timeout_seconds = timeout_seconds
         self.use_test_execution = use_test_execution
@@ -93,7 +93,7 @@ class MBPPBenchmark(BaseBenchmark):
             'truncated': gen_metadata.get('truncated', False),
             'num_tokens': gen_metadata.get('num_tokens', 0),
             'prompt_tokens': gen_metadata.get('prompt_tokens', 0),
-            'adaptive_limit': gen_metadata.get('adaptive_limit', self.max_new_tokens),
+            'max_tokens_limit': gen_metadata.get('max_tokens_limit', self.max_new_tokens),
             'success': True
         }
     
@@ -156,11 +156,11 @@ class MBPPBenchmark(BaseBenchmark):
         total_prompt_tokens = sum(r.get('prompt_tokens', 0) for r in successful_results)
         avg_prompt_tokens = total_prompt_tokens / len(successful_results)
         
-        # Max token limit statistics (adaptive limits per sample)
-        adaptive_limits = [r.get('adaptive_limit', self.max_new_tokens) for r in successful_results]
-        max_token_limit = max(adaptive_limits) if adaptive_limits else self.max_new_tokens
-        min_token_limit = min(adaptive_limits) if adaptive_limits else self.max_new_tokens
-        avg_token_limit = sum(adaptive_limits) / len(adaptive_limits) if adaptive_limits else self.max_new_tokens
+        # Max token limit statistics (now fixed, not adaptive)
+        token_limits = [r.get('max_tokens_limit', self.max_new_tokens) for r in successful_results]
+        max_token_limit = max(token_limits) if token_limits else self.max_new_tokens
+        min_token_limit = min(token_limits) if token_limits else self.max_new_tokens
+        avg_token_limit = sum(token_limits) / len(token_limits) if token_limits else self.max_new_tokens
         
         # Log truncation warning if rate is significant
         if truncation_rate > 0.05:  # More than 5% truncated

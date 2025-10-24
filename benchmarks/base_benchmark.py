@@ -14,6 +14,7 @@ def get_adaptive_max_tokens(prompt: str, benchmark_name: str,
                             base_limit: int = None) -> int:
     """
     Calculate adaptive max_new_tokens based on prompt complexity.
+    DEPRECATED: Now using fixed maximum limits to avoid truncation.
     
     Args:
         prompt: The input prompt text
@@ -21,47 +22,21 @@ def get_adaptive_max_tokens(prompt: str, benchmark_name: str,
         base_limit: Override default base limit for the benchmark
     
     Returns:
-        Adaptive max_new_tokens (min: 512, max: 4096)
+        Fixed max token limit (no adaptation)
     """
-    # Default base limits per benchmark (based on empirical data)
-    # Significantly increased to handle truncation: HumanEval 34%, HumanEval+ 38%, MBPP 60%
+    # Fixed high limits to eliminate truncation
+    # Based on empirical data showing high truncation rates
     default_limits = {
-        'humaneval': 2048,      # Increased from 1536 (was 34% truncation @ avg 608 tokens)
-        'humanevalplus': 2048,  # Increased from 1536 (was 38% truncation @ avg 658 tokens)
-        'mbpp': 3072            # Increased from 2048 (was 60% truncation @ avg 1326 tokens)
+        'humaneval': 4096,      # Was experiencing 34% truncation even at 2048
+        'humanevalplus': 4096,  # Was experiencing 38% truncation even at 2048
+        'mbpp': 4096            # Was experiencing 60% truncation even at 3072
     }
     
     # Use provided base_limit or fallback to benchmark default
     if base_limit is not None:
-        limit = base_limit
+        return base_limit
     else:
-        limit = default_limits.get(benchmark_name.lower(), 2048)
-    
-    # Adjust based on prompt complexity
-    prompt_words = len(prompt.split())
-    
-    # Very long prompts likely indicate complex problems
-    if prompt_words > 200:
-        limit = min(int(limit * 1.5), 4096)
-    elif prompt_words > 150:
-        limit = min(int(limit * 1.3), 4096)
-    elif prompt_words > 100:
-        limit = min(int(limit * 1.2), 4096)
-    
-    # Check for complexity indicators
-    complexity_keywords = [
-        'implement', 'algorithm', 'data structure', 'class',
-        'recursive', 'dynamic programming', 'optimize',
-        'multiple', 'complex', 'advanced'
-    ]
-    complexity_score = sum(1 for kw in complexity_keywords if kw.lower() in prompt.lower())
-    if complexity_score >= 3:
-        limit = min(limit + 512, 4096)
-    
-    # Ensure minimum threshold
-    limit = max(limit, 512)
-    
-    return limit
+        return default_limits.get(benchmark_name.lower(), 4096)
 
 
 class BaseBenchmark(ABC):
@@ -99,15 +74,13 @@ class BaseBenchmark(ABC):
                 - prompt_tokens: int number of tokens in prompt
                 - adaptive_limit: int the max_new_tokens used (if adaptive)
         """
-        # Calculate adaptive token limit if enabled
-        if self.use_adaptive_tokens and 'max_new_tokens' not in generation_kwargs:
-            adaptive_limit = get_adaptive_max_tokens(prompt, self.name, self.max_new_tokens)
-        else:
-            adaptive_limit = generation_kwargs.get('max_new_tokens', self.max_new_tokens)
+        # Use max token limit directly (no dynamic adjustment)
+        # Adaptive tokens disabled - just use the maximum to avoid truncation
+        max_tokens = generation_kwargs.get('max_new_tokens', self.max_new_tokens)
         
         # Default generation parameters
         default_kwargs = {
-            'max_new_tokens': adaptive_limit,
+            'max_new_tokens': max_tokens,
             'temperature': 0.2,
             'do_sample': True,
             'top_p': 0.95,
@@ -116,9 +89,9 @@ class BaseBenchmark(ABC):
         }
         default_kwargs.update(generation_kwargs)
         
-        # Tokenize input - use larger context for code generation
-        # HumanEval prompts can be long (docstrings + function signatures)
-        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        # Tokenize input - NO TRUNCATION for prompts!
+        # Code generation prompts should never be cut off
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=False)
         prompt_tokens = inputs['input_ids'].shape[1]
         
         # Move to model's device
@@ -156,7 +129,7 @@ class BaseBenchmark(ABC):
             'truncated': truncated,
             'num_tokens': generated_tokens,
             'prompt_tokens': prompt_tokens,
-            'adaptive_limit': adaptive_limit if self.use_adaptive_tokens else self.max_new_tokens,
+            'max_tokens_limit': max_tokens,  # Fixed limit used (no adaptation)
         }
         
         # Debug: warn if completion is empty
@@ -180,10 +153,9 @@ class BaseBenchmark(ABC):
         if prefix:
             print(f"Model: {prefix}")
         print(f"{'='*80}")
-        print(f"Base max_new_tokens: {self.max_new_tokens}")
-        print(f"Adaptive tokens: {'enabled' if self.use_adaptive_tokens else 'disabled'}")
-        if self.use_adaptive_tokens:
-            print(f"Adaptive range: 512-4096 tokens (adjusts per prompt complexity)")
+        print(f"Max tokens for generation: {self.max_new_tokens}")
+        print(f"Adaptive tokens: disabled (using fixed maximum to eliminate truncation)")
+        print(f"Prompt truncation: disabled (full prompts preserved)")
         
         # Load dataset
         dataset = self.load_dataset()
