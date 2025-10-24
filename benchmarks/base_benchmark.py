@@ -113,6 +113,8 @@ class BaseBenchmark(ABC):
             if hasattr(self.tokenizer, 'eos_token') and self.tokenizer.eos_token:
                 stop_strings = self.get_stop_sequences()
                 default_kwargs['stop_strings'] = stop_strings
+                # IMPORTANT: Must pass tokenizer when using stop_strings
+                default_kwargs['tokenizer'] = self.tokenizer
         else:
             # Sampling mode (legacy)
             default_kwargs = {
