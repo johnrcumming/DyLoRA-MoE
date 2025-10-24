@@ -32,11 +32,11 @@ class HumanEvalBenchmark(BaseBenchmark):
         test = sample.get('test', '')
         entry_point = sample.get('entry_point', '')
         
-        # Generate completion (now returns completion and metadata)
-        completion, gen_metadata = self.generate_completion(model, prompt)
+        # Generate completion with greedy decoding (now returns completion and metadata)
+        completion, gen_metadata = self.generate_completion(model, prompt, greedy=True)
         
-        # Extract function definition from completion
-        function_code = self._extract_function_code(completion, entry_point)
+        # Use EvalPlus sanitization to extract function code
+        function_code = self.sanitize_completion(completion, prompt, entry_point)
         
         # Debug: Check why function_code might be empty
         if self.use_test_execution and test and not function_code:

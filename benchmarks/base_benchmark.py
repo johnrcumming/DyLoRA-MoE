@@ -1,5 +1,6 @@
 """
 Base benchmark class for evaluating models on various coding tasks.
+Integrated with EvalPlus framework for rigorous evaluation.
 """
 import torch
 import wandb
@@ -8,6 +9,9 @@ from typing import Dict, Any, List, Optional
 from transformers import AutoTokenizer
 from dylo_moe.model import DyLoRA_MoE
 from tqdm import tqdm
+
+# Import EvalPlus sanitization utilities
+from evalplus.sanitize import sanitize
 
 
 def get_adaptive_max_tokens(prompt: str, benchmark_name: str, 
@@ -64,8 +68,14 @@ class BaseBenchmark(ABC):
         """Compute final benchmark metrics from all results."""
         pass
     
-    def generate_completion(self, model, prompt: str, **generation_kwargs) -> tuple[str, dict]:
+    def generate_completion(self, model, prompt: str, greedy: bool = True, **generation_kwargs) -> tuple[str, dict]:
         """Generate code completion for a given prompt.
+        
+        Args:
+            model: The model to generate with
+            prompt: Input prompt text
+            greedy: If True, use greedy decoding (temperature=0, no sampling). Default True.
+            **generation_kwargs: Additional generation parameters (override defaults)
         
         Returns:
             tuple: (completion_text, metadata_dict) where metadata includes:
@@ -79,14 +89,25 @@ class BaseBenchmark(ABC):
         max_tokens = generation_kwargs.get('max_new_tokens', self.max_new_tokens)
         
         # Default generation parameters
-        default_kwargs = {
-            'max_new_tokens': max_tokens,
-            'temperature': 0.2,
-            'do_sample': True,
-            'top_p': 0.95,
-            'pad_token_id': self.tokenizer.pad_token_id,
-            'eos_token_id': self.tokenizer.eos_token_id,
-        }
+        if greedy:
+            # Greedy decoding for deterministic, reproducible results (EvalPlus standard)
+            default_kwargs = {
+                'max_new_tokens': max_tokens,
+                'temperature': 0.0,
+                'do_sample': False,
+                'pad_token_id': self.tokenizer.pad_token_id,
+                'eos_token_id': self.tokenizer.eos_token_id,
+            }
+        else:
+            # Sampling mode (legacy)
+            default_kwargs = {
+                'max_new_tokens': max_tokens,
+                'temperature': 0.2,
+                'do_sample': True,
+                'top_p': 0.95,
+                'pad_token_id': self.tokenizer.pad_token_id,
+                'eos_token_id': self.tokenizer.eos_token_id,
+            }
         default_kwargs.update(generation_kwargs)
         
         # Tokenize input - NO TRUNCATION for prompts!
@@ -144,6 +165,29 @@ class BaseBenchmark(ABC):
         
         model.train()
         return completion, metadata
+    
+    def sanitize_completion(self, completion: str, prompt: str, entry_point: Optional[str] = None) -> str:
+        """Sanitize generated code using EvalPlus tree-sitter extraction.
+        
+        Args:
+            completion: Raw generated code
+            prompt: Original prompt (used to reconstruct full solution)
+            entry_point: Function name to extract dependencies for
+            
+        Returns:
+            Sanitized code with only relevant function definitions
+        """
+        # Combine prompt + completion for full context
+        full_solution = prompt + "\n" + completion
+        
+        # Use EvalPlus sanitization
+        try:
+            sanitized = sanitize(code=full_solution, entrypoint=entry_point)
+            return sanitized
+        except Exception as e:
+            # Fallback to returning raw completion if sanitization fails
+            print(f"  ⚠️  Sanitization failed: {e}, returning raw completion")
+            return completion
     
     def run_benchmark(self, model, max_samples: Optional[int] = None, 
                      log_to_wandb: bool = False, prefix: str = "") -> Dict[str, Any]:

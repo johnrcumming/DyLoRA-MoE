@@ -40,11 +40,11 @@ class MBPPBenchmark(BaseBenchmark):
         # Create prompt from problem description
         prompt = f"# Problem: {text}\n# Write a Python function to solve this problem.\n\n"
         
-        # Generate completion (now returns completion and metadata)
-        completion, gen_metadata = self.generate_completion(model, prompt)
+        # Generate completion with greedy decoding (now returns completion and metadata)
+        completion, gen_metadata = self.generate_completion(model, prompt, greedy=True)
         
-        # Extract function definition from completion
-        function_code = self._extract_function_code(completion)
+        # Use EvalPlus sanitization - MBPP doesn't have entry_point, use None
+        function_code = self.sanitize_completion(completion, prompt, entry_point=None)
         
         # Debug: Check why function_code might be empty
         if self.use_test_execution and test_list and not function_code:
