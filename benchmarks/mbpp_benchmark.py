@@ -20,6 +20,19 @@ class MBPPBenchmark(BaseBenchmark):
         self.timeout_seconds = timeout_seconds
         self.use_test_execution = use_test_execution
     
+    def get_stop_sequences(self) -> List[str]:
+        """Get MBPP-specific stop sequences following EvalPlus standards.
+        
+        EvalPlus uses different stop sequences for MBPP vs HumanEval:
+        - MBPP: stops at docstring end or test assertions
+        - HumanEval: stops at new function/class/import definitions
+        
+        Returns:
+            List of MBPP-specific stop strings
+        """
+        # EvalPlus MBPP stop sequences: docstring end and assert statements
+        return ['\n"""', "\nassert"]
+    
     def load_dataset(self) -> List[Dict[str, Any]]:
         """Load the MBPP dataset.
         
@@ -40,8 +53,14 @@ class MBPPBenchmark(BaseBenchmark):
         # Create prompt from problem description
         prompt = f"# Problem: {text}\n# Write a Python function to solve this problem.\n\n"
         
-        # Generate completion with greedy decoding (now returns completion and metadata)
-        completion, gen_metadata = self.generate_completion(model, prompt, greedy=True)
+        # Generate completion with greedy decoding and reduced max tokens for MBPP
+        # MBPP has shorter prompts, so we use fewer tokens to prevent rambling
+        completion = self.generate_completion(
+                model, 
+                prompt, 
+                greedy=True,
+                max_new_tokens=768  # Matches EvalPlus standard for MBPP
+            )
         
         # Use EvalPlus sanitization - MBPP doesn't have entry_point, use None
         function_code = self.sanitize_completion(completion, prompt, entry_point=None)

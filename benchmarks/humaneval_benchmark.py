@@ -20,6 +20,18 @@ class HumanEvalBenchmark(BaseBenchmark):
         self.timeout_seconds = timeout_seconds
         self.use_test_execution = use_test_execution
     
+    def get_stop_sequences(self) -> List[str]:
+        """Get HumanEval-specific stop sequences following EvalPlus standards.
+        
+        EvalPlus uses these stop sequences for HumanEval to prevent generating
+        beyond the required function (stops at new definitions or assertions).
+        
+        Returns:
+            List of HumanEval-specific stop strings
+        """
+        # EvalPlus HumanEval stop sequences: prevents generating new code blocks
+        return ["\ndef ", "\nclass ", "\nimport ", "\nfrom ", "\nassert "]
+    
     def load_dataset(self) -> List[Dict[str, Any]]:
         """Load the HumanEval dataset."""
         return list(download_humaneval())

@@ -68,6 +68,15 @@ class BaseBenchmark(ABC):
         """Compute final benchmark metrics from all results."""
         pass
     
+    def get_stop_sequences(self) -> List[str]:
+        """Get benchmark-specific stop sequences following EvalPlus standards.
+        
+        Returns:
+            List of stop strings for this benchmark. Override in subclasses.
+        """
+        # Default stop sequences (HumanEval-style)
+        return ["\ndef ", "\nclass ", "\nimport ", "\nfrom ", "\nassert "]
+    
     def generate_completion(self, model, prompt: str, greedy: bool = True, **generation_kwargs) -> tuple[str, dict]:
         """Generate code completion for a given prompt.
         
@@ -98,6 +107,12 @@ class BaseBenchmark(ABC):
                 'pad_token_id': self.tokenizer.pad_token_id,
                 'eos_token_id': self.tokenizer.eos_token_id,
             }
+            
+            # Add benchmark-specific stop sequences following EvalPlus protocol
+            # These prevent the model from generating beyond the required function
+            if hasattr(self.tokenizer, 'eos_token') and self.tokenizer.eos_token:
+                stop_strings = self.get_stop_sequences()
+                default_kwargs['stop_strings'] = stop_strings
         else:
             # Sampling mode (legacy)
             default_kwargs = {
