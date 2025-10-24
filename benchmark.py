@@ -17,10 +17,10 @@ Usage:
     python benchmark.py --benchmarks humaneval mbpp --model_name microsoft/DialoGPT-medium
 
     # Run MBPP benchmark only
-    python benchmark.py --benchmarks mbpp --max_samples 100
+    python benchmark.py --benchmarks mbpp --max_samples 500
 
     # Full evaluation (all samples, all benchmarks, uses default base model)
-    python benchmark.py --max_samples 500
+    python benchmark.py --benchmarks humaneval humanevalplus mbpp --max_samples 500
 
     # Quick test (subset, disable W&B logging, uses default base model)
     python benchmark.py --max_samples 20 --no_wandb
@@ -617,7 +617,7 @@ def parse_args(argv=None):
     parser.add_argument("--benchmarks", type=str, nargs="+", default=["humaneval"],
                        help="Benchmarks to run: humaneval, humanevalplus, mbpp (default: humaneval)")
     parser.add_argument("--max_samples", type=int, default=None,
-                       help="Maximum samples per benchmark (default: all)")
+                       help="Maximum samples per benchmark (default: all - HumanEval=164, HumanEval+=164, MBPP=500)")
     
     # Environment arguments
     parser.add_argument("--hf_token", type=str, default=None,

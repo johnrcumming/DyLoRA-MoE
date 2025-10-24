@@ -21,7 +21,11 @@ class MBPPBenchmark(BaseBenchmark):
         self.use_test_execution = use_test_execution
     
     def load_dataset(self) -> List[Dict[str, Any]]:
-        """Load the MBPP dataset."""
+        """Load the MBPP dataset.
+        
+        The MBPP test split contains 500 samples.
+        Use max_samples parameter in run_benchmark() to limit evaluation.
+        """
         dataset = load_dataset("mbpp", split="test")
         return list(dataset)
     
