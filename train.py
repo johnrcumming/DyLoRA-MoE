@@ -1188,8 +1188,8 @@ def parse_args(argv=None):
              "python_code_instructions_18k, python_code_23k_sharegpt. "
              "Example: --datasets 'code_alpaca,mbpp,evol_instruct'"
     )
-    parser.add_argument("--benchmarks", type=str, nargs="+", default=["humaneval"],
-                       help="Benchmarks to run for baseline and final evaluation: humaneval, humanevalplus, mbpp (default: humaneval)")
+    parser.add_argument("--benchmarks", type=str, nargs="+", default=["humanevalplus"],
+                       help="Benchmarks to run for baseline and final evaluation: humaneval, humanevalplus, mbpp (default: humanevalplus)")
     parser.add_argument("--data_prep_only", action="store_true",
                        help="Only perform data preparation and report statistics (including truncation analysis), then exit without training.")
     return parser.parse_args(argv)

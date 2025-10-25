@@ -6,7 +6,7 @@ import re
 import subprocess
 import tempfile
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from .base_benchmark import BaseBenchmark
 from datasets import load_dataset
 
@@ -15,8 +15,10 @@ class MBPPBenchmark(BaseBenchmark):
     """MBPP (Mostly Basic Programming Problems) benchmark."""
     
     def __init__(self, tokenizer, max_new_tokens: int = 4096, timeout_seconds: int = 10,
-                 use_test_execution: bool = True, use_adaptive_tokens: bool = False):
-        super().__init__("MBPP", tokenizer, max_new_tokens, use_adaptive_tokens)
+                 use_test_execution: bool = True, use_adaptive_tokens: bool = False,
+                 use_async_tests: bool = False, max_concurrent_tests: Optional[int] = None):
+        super().__init__("MBPP", tokenizer, max_new_tokens, use_adaptive_tokens,
+                        use_async_tests, max_concurrent_tests)
         self.timeout_seconds = timeout_seconds
         self.use_test_execution = use_test_execution
     
@@ -55,7 +57,7 @@ class MBPPBenchmark(BaseBenchmark):
         
         # Generate completion with greedy decoding and reduced max tokens for MBPP
         # MBPP has shorter prompts, so we use fewer tokens to prevent rambling
-        completion = self.generate_completion(
+        completion, gen_metadata = self.generate_completion(
                 model, 
                 prompt, 
                 greedy=True,
@@ -119,6 +121,97 @@ class MBPPBenchmark(BaseBenchmark):
             'max_tokens_limit': gen_metadata.get('max_tokens_limit', self.max_new_tokens),
             'success': True
         }
+    
+    def generate_completion_for_async(self, model, sample: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate completion without executing tests (for async pipeline).
+        
+        Returns a dict with generation metadata that can be passed to execute_tests_async().
+        """
+        task_id = sample.get('task_id', 'unknown')
+        text = sample.get('text', '')
+        code = sample.get('code', '')
+        
+        # Create prompt from problem description
+        prompt = f"# Problem: {text}\n# Write a Python function to solve this problem.\n\n"
+        
+        # Generate completion with greedy decoding
+        completion, gen_metadata = self.generate_completion(
+                model, 
+                prompt, 
+                greedy=True,
+                max_new_tokens=self.max_new_tokens  # Use configured max_new_tokens (4096)
+            )
+        
+        # Use EvalPlus sanitization
+        function_code = self.sanitize_completion(completion, prompt, entry_point=None)
+        
+        # Basic checks
+        has_function_def = bool(re.search(r'def\s+\w+', completion))
+        has_return = 'return' in completion
+        
+        return {
+            'task_id': task_id,
+            'prompt': prompt,
+            'text': text,
+            'completion': completion,
+            'function_code': function_code,
+            'canonical_solution': code,
+            'has_function_def': has_function_def,
+            'has_return': has_return,
+            'truncated': gen_metadata.get('truncated', False),
+            'num_tokens': gen_metadata.get('num_tokens', 0),
+            'prompt_tokens': gen_metadata.get('prompt_tokens', 0),
+            'max_tokens_limit': gen_metadata.get('max_tokens_limit', self.max_new_tokens),
+            'test_list': sample.get('test_list', []),  # Pass tests for later execution
+            'test_setup_code': sample.get('test_setup_code', ''),
+            'success': True
+        }
+    
+    def execute_tests_async(self, generation_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute tests on a generated completion (for async pipeline).
+        
+        Args:
+            generation_result: Output from generate_completion_for_async()
+            
+        Returns:
+            Updated result dict with test execution results
+        """
+        test_list = generation_result.get('test_list', [])
+        test_setup_code = generation_result.get('test_setup_code', '')
+        function_code = generation_result.get('function_code', '')
+        completion = generation_result.get('completion', '')
+        
+        tests_passed = 0
+        tests_failed = 0
+        execution_errors = []
+        test_run = False
+        
+        # Run tests if enabled and we have test code
+        if self.use_test_execution and test_list:
+            code_to_test = function_code if function_code and function_code.strip() else completion
+            if code_to_test and code_to_test.strip():
+                test_run = True
+                for test_assertion in test_list:
+                    passed, error = self._execute_test(code_to_test, test_assertion, test_setup_code)
+                    if passed:
+                        tests_passed += 1
+                    else:
+                        tests_failed += 1
+                        if error:
+                            execution_errors.append(error)
+        
+        # Update result with test outcomes
+        generation_result['tests_passed'] = tests_passed
+        generation_result['tests_failed'] = tests_failed
+        generation_result['total_tests'] = len(test_list) if test_list else 0
+        generation_result['execution_errors'] = execution_errors[:3]  # Keep first 3 errors
+        generation_result['test_run'] = test_run
+        
+        # Remove test code from result (no longer needed)
+        generation_result.pop('test_list', None)
+        generation_result.pop('test_setup_code', None)
+        
+        return generation_result
     
     def compute_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Compute MBPP metrics."""

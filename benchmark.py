@@ -460,14 +460,18 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
 
 
 def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list, 
-                  max_samples: Optional[int] = None, log_to_wandb: bool = False) -> Dict[str, Any]:
+                  max_samples: Optional[int] = None, log_to_wandb: bool = False,
+                  use_async_tests: bool = False, max_concurrent_tests: Optional[int] = None) -> Dict[str, Any]:
     """Run all specified benchmarks on all models."""
     
     # Initialize available benchmarks with fixed high token limits (no adaptive adjustment)
     available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False),
-        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False),
-        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False)
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False,
+                                       use_async_tests=use_async_tests, max_concurrent_tests=max_concurrent_tests),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False,
+                                               use_async_tests=use_async_tests, max_concurrent_tests=max_concurrent_tests),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False,
+                             use_async_tests=use_async_tests, max_concurrent_tests=max_concurrent_tests)
     }
     
     # Validate requested benchmarks
@@ -618,6 +622,10 @@ def parse_args(argv=None):
                        help="Benchmarks to run: humaneval, humanevalplus, mbpp (default: humaneval)")
     parser.add_argument("--max_samples", type=int, default=None,
                        help="Maximum samples per benchmark (default: all - HumanEval=164, HumanEval+=164, MBPP=500)")
+    parser.add_argument("--use_async_tests", action="store_true",
+                       help="Enable async test execution for improved GPU utilization (default: disabled)")
+    parser.add_argument("--max_concurrent_tests", type=int, default=None,
+                       help="Max concurrent test processes for async mode (default: cpu_count() // 2)")
     
     # Environment arguments
     parser.add_argument("--hf_token", type=str, default=None,
@@ -762,6 +770,8 @@ def main(args=None):
         print(f"Models: {list(models.keys())}")
         print(f"Benchmarks: {args.benchmarks}")
         print(f"Max samples: {args.max_samples or 'all'}")
+        if args.use_async_tests:
+            print(f"Async test execution: enabled (max workers: {args.max_concurrent_tests or 'auto'})")
         print(f"{'='*100}")
         
         results = run_benchmarks(
@@ -769,7 +779,9 @@ def main(args=None):
             tokenizer=tokenizer,
             benchmarks=args.benchmarks,
             max_samples=args.max_samples,
-            log_to_wandb=log_to_wandb
+            log_to_wandb=log_to_wandb,
+            use_async_tests=args.use_async_tests,
+            max_concurrent_tests=args.max_concurrent_tests
         )
         
         # Compare results

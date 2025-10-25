@@ -7,7 +7,7 @@ import re
 import subprocess
 import tempfile
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from .base_benchmark import BaseBenchmark
 from datasets import load_dataset
 
@@ -16,8 +16,10 @@ class HumanEvalPlusBenchmark(BaseBenchmark):
     """HumanEval+ benchmark with enhanced test coverage."""
     
     def __init__(self, tokenizer, max_new_tokens: int = 4096, timeout_seconds: int = 10,
-                 use_test_execution: bool = True, use_adaptive_tokens: bool = False):
-        super().__init__("HumanEval+", tokenizer, max_new_tokens, use_adaptive_tokens)
+                 use_test_execution: bool = True, use_adaptive_tokens: bool = False,
+                 use_async_tests: bool = False, max_concurrent_tests: Optional[int] = None):
+        super().__init__("HumanEval+", tokenizer, max_new_tokens, use_adaptive_tokens,
+                        use_async_tests, max_concurrent_tests)
         self.timeout_seconds = timeout_seconds
         self.use_test_execution = use_test_execution
     
@@ -98,6 +100,78 @@ class HumanEvalPlusBenchmark(BaseBenchmark):
             'max_tokens_limit': gen_metadata.get('max_tokens_limit', self.max_new_tokens),
             'success': True
         }
+    
+    def generate_completion_for_async(self, model, sample: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate completion without executing tests (for async pipeline).
+        
+        Returns a dict with generation metadata that can be passed to execute_tests_async().
+        """
+        task_id = sample.get('task_id', 'unknown')
+        prompt = sample.get('prompt', '')
+        canonical_solution = sample.get('canonical_solution', '')
+        entry_point = sample.get('entry_point', '')
+        
+        # Generate completion with greedy decoding
+        completion, gen_metadata = self.generate_completion(model, prompt, greedy=True)
+        
+        # Use EvalPlus sanitization to extract function code
+        function_code = self.sanitize_completion(completion, prompt, entry_point)
+        
+        # Basic checks
+        has_entry_point = entry_point in completion if entry_point else False
+        has_function_def = bool(re.search(r'def\s+\w+', completion))
+        has_return = 'return' in completion
+        
+        return {
+            'task_id': task_id,
+            'prompt': prompt,
+            'completion': completion,
+            'function_code': function_code,
+            'canonical_solution': canonical_solution,
+            'has_entry_point': has_entry_point,
+            'has_function_def': has_function_def,
+            'has_return': has_return,
+            'truncated': gen_metadata.get('truncated', False),
+            'num_tokens': gen_metadata.get('num_tokens', 0),
+            'prompt_tokens': gen_metadata.get('prompt_tokens', 0),
+            'max_tokens_limit': gen_metadata.get('max_tokens_limit', self.max_new_tokens),
+            'test': sample.get('test', ''),  # Pass test for later execution
+            'success': True
+        }
+    
+    def execute_tests_async(self, generation_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute tests on a generated completion (for async pipeline).
+        
+        Args:
+            generation_result: Output from generate_completion_for_async()
+            
+        Returns:
+            Updated result dict with test execution results
+        """
+        test = generation_result.get('test', '')
+        function_code = generation_result.get('function_code', '')
+        completion = generation_result.get('completion', '')
+        
+        test_passed = False
+        execution_error = None
+        test_run = False
+        
+        # Run tests if enabled and we have test code
+        if self.use_test_execution and test:
+            code_to_test = function_code if function_code and function_code.strip() else completion
+            if code_to_test and code_to_test.strip():
+                test_run = True
+                test_passed, execution_error = self._execute_test(code_to_test, test)
+        
+        # Update result with test outcomes
+        generation_result['test_passed'] = test_passed
+        generation_result['execution_error'] = execution_error
+        generation_result['test_run'] = test_run
+        
+        # Remove test code from result (no longer needed)
+        generation_result.pop('test', None)
+        
+        return generation_result
     
     def compute_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Compute HumanEval+ metrics."""
