@@ -173,7 +173,8 @@ class GradientMonitoringCallback(TrainerCallback):
                 if lora_total > 0:
                     log_dict["grad_ratio/lora_all"] = lora_total / total_grad_norm
             
-            wandb.log(log_dict, step=state.global_step)
+            # Use commit=False to allow other callbacks to add more metrics to the same step
+            wandb.log(log_dict, step=state.global_step, commit=False)
 
 
 class DyLoRAMonitoringCallback(TrainerCallback):
@@ -367,7 +368,7 @@ def analyze_truncation_stats(texts, tokenizer, max_length=768, dataset_name="Dat
     }
 
 
-def preprocess_evaluation_dataset(tokenizer, dataset):
+def preprocess_evaluation_dataset(tokenizer, dataset, max_length: int = 768):
     """
     Tokenizes the evaluation dataset.
     """
@@ -378,12 +379,12 @@ def preprocess_evaluation_dataset(tokenizer, dataset):
         else:
             # The Code Alpaca dataset has 'instruction' and 'output' columns.
             processed_text = [f"{instruction}\n{output}" for instruction, output in zip(examples["instruction"], examples["output"])]
-        return tokenizer(processed_text, padding="max_length", truncation=True, max_length=768)
+        return tokenizer(processed_text, padding="max_length", truncation=True, max_length=max_length)
 
     tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset.column_names)
     return tokenized_dataset
 
-def pack_sequences(tokenizer, texts, max_length=768):
+def pack_sequences(tokenizer, texts, max_length: int = 768):
     """Naive sequence packing: concatenate tokenized sequences until max_length reached."""
     input_ids_batches = []
     attn_batches = []
@@ -509,12 +510,12 @@ def create_multi_dataset_interleaved(*datasets, total_samples=None):
     return interleaved
 
 
-def preprocess_training_dataset(tokenizer, skill_data, pack=True):
+def preprocess_training_dataset(tokenizer, skill_data, pack=True, max_length: int = 768):
     if pack:
-        input_ids, attn = pack_sequences(tokenizer, skill_data)
+        input_ids, attn = pack_sequences(tokenizer, skill_data, max_length=max_length)
         dataset = Dataset.from_dict({"input_ids": input_ids, "attention_mask": attn, "labels": input_ids})
     else:
-        tokenized_data = tokenizer(skill_data, padding=True, truncation=True, return_tensors="pt", max_length=768)
+        tokenized_data = tokenizer(skill_data, padding=True, truncation=True, return_tensors="pt", max_length=max_length)
         dataset = Dataset.from_dict({"input_ids": tokenized_data.input_ids, "attention_mask": tokenized_data.attention_mask, "labels": tokenized_data.input_ids})
     return dataset
 
@@ -942,8 +943,8 @@ def main(args):
     print(f"\n{'='*80}")
     print("TRUNCATION ANALYSIS")
     print(f"{'='*80}")
-    train_stats = analyze_truncation_stats(train_data, tokenizer, max_length=768, dataset_name="Training Set")
-    val_stats = analyze_truncation_stats(val_data, tokenizer, max_length=768, dataset_name="Validation Set")
+    train_stats = analyze_truncation_stats(train_data, tokenizer, max_length=args.max_seq_length, dataset_name="Training Set")
+    val_stats = analyze_truncation_stats(val_data, tokenizer, max_length=args.max_seq_length, dataset_name="Validation Set")
     
     # Log truncation stats to wandb
     wandb.log({
@@ -957,8 +958,8 @@ def main(args):
     
     print(f"{'='*80}\n")
     
-    train_dataset = preprocess_training_dataset(tokenizer, train_data, pack=True)
-    val_dataset = preprocess_evaluation_dataset(tokenizer, Dataset.from_dict({"text": val_data}))
+    train_dataset = preprocess_training_dataset(tokenizer, train_data, pack=True, max_length=args.max_seq_length)
+    val_dataset = preprocess_evaluation_dataset(tokenizer, Dataset.from_dict({"text": val_data}), max_length=args.max_seq_length)
     
     print(f"Training dataset: {len(train_dataset)} examples")
     print(f"Validation dataset: {len(val_dataset)} examples")
@@ -1177,6 +1178,8 @@ def parse_args(argv=None):
     parser.add_argument("--train_batch_size", type=int, default=4, help="Per-device training batch size.")
     parser.add_argument("--eval_batch_size", type=int, default=4, help="Per-device evaluation batch size.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Number of gradient accumulation steps (effective batch size = train_batch_size * gradient_accumulation_steps).")
+    parser.add_argument("--max_seq_length", type=int, default=2048, 
+                        help="Maximum sequence length for tokenization (default: 2048, CodeGemma supports up to 8192)")
     parser.add_argument("--disable_early_stopping", action="store_true", help="Disable early stopping and train for all epochs.")
     parser.add_argument("--early_stopping_patience", type=int, default=3, help="Number of epochs with no improvement before stopping (only applies if early stopping is enabled).")
     parser.add_argument(
