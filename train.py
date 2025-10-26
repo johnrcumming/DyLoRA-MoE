@@ -294,6 +294,53 @@ class DyLoRAMonitoringCallback(TrainerCallback):
                     }, step=state.global_step)
 
 
+class BenchmarkCallback(TrainerCallback):
+    """
+    Callback to run benchmarks at the end of each epoch.
+    Only used when benchmark_strategy='epoch'.
+    """
+    
+    def __init__(self, model, tokenizer, benchmark_names, use_test_execution=True):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.benchmark_names = benchmark_names
+        self.use_test_execution = use_test_execution
+        
+    def on_epoch_end(self, args, state, control, **kwargs):
+        """Called at the end of each epoch to run benchmarks."""
+        epoch = int(state.epoch) if state.epoch is not None else 0
+        
+        print(f"\n{'='*80}")
+        print(f"EPOCH {epoch} EVALUATION")
+        print(f"{'='*80}")
+        
+        # Run benchmark suite
+        from train import run_benchmark_suite
+        epoch_results = run_benchmark_suite(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            benchmark_names=self.benchmark_names,
+            max_samples=None,
+            use_test_execution=self.use_test_execution,
+            log_prefix=f"epoch_{epoch}"
+        )
+        
+        # Log results to wandb for each benchmark
+        for benchmark_name, result in epoch_results.items():
+            metrics = result['metrics']
+            wandb.log({
+                f"epoch_{epoch}/{benchmark_name}_pass@1": metrics.get('pass@1', 0.0),
+                f"epoch_{epoch}/{benchmark_name}_syntax_score": metrics.get('syntax_score', 0.0),
+                f"epoch_{epoch}/{benchmark_name}_entry_point_score": metrics.get('entry_point_score', 0.0),
+                f"epoch_{epoch}/{benchmark_name}_truncation_rate": metrics.get('truncation_rate', 0.0),
+                f"epoch_{epoch}/{benchmark_name}_avg_tokens_generated": metrics.get('avg_tokens_generated', 0.0),
+                f"epoch_{epoch}/{benchmark_name}_tests_passed": metrics.get('tests_passed', 0),
+                f"epoch_{epoch}/{benchmark_name}_tests_run": metrics.get('tests_run', 0),
+            }, step=state.global_step, commit=False)
+        
+        print(f"{'='*80}\n")
+
+
 def analyze_truncation_stats(texts, tokenizer, max_length=768, dataset_name="Dataset"):
     """
     Analyze and report truncation statistics for a dataset.
@@ -510,7 +557,37 @@ def create_multi_dataset_interleaved(*datasets, total_samples=None):
     return interleaved
 
 
-def preprocess_training_dataset(tokenizer, skill_data, pack=True, max_length: int = 768):
+def preprocess_training_dataset(tokenizer, skill_data, pack=True, max_length: int = 768, drop_truncated: bool = True):
+    """
+    Preprocess training data, optionally filtering out truncated examples.
+    
+    Args:
+        tokenizer: Tokenizer to use
+        skill_data: List of text strings
+        pack: Whether to use sequence packing
+        max_length: Maximum sequence length
+        drop_truncated: If True, drop examples that would be truncated (default: True)
+    
+    Returns:
+        Dataset with preprocessed examples
+    """
+    # Filter out truncated examples if requested
+    if drop_truncated:
+        filtered_data = []
+        dropped_count = 0
+        for text in skill_data:
+            token_length = len(tokenizer(text, add_special_tokens=True)['input_ids'])
+            if token_length <= max_length:
+                filtered_data.append(text)
+            else:
+                dropped_count += 1
+        
+        if dropped_count > 0:
+            print(f"\n⚠️  Dropped {dropped_count}/{len(skill_data)} examples ({dropped_count/len(skill_data)*100:.1f}%) that exceeded max_length={max_length}")
+            print(f"   Remaining examples: {len(filtered_data)}")
+        
+        skill_data = filtered_data
+    
     if pack:
         input_ids, attn = pack_sequences(tokenizer, skill_data, max_length=max_length)
         dataset = Dataset.from_dict({"input_ids": input_ids, "attention_mask": attn, "labels": input_ids})
@@ -781,36 +858,40 @@ def main(args):
     # Move model to GPU if available (needed for baseline evaluation)
     model = move_model_to_device(model, verbose=True)
     
-    # Baseline: Evaluate base model (before LoRA training) on HumanEval
-    print("\n" + "="*80)
-    print("BASELINE EVALUATION: Base Model (Before LoRA Training)")
-    print("="*80)
-    
-    # Run benchmark suite on base model
-    baseline_results = run_benchmark_suite(
-        model=model,
-        tokenizer=tokenizer,
-        benchmark_names=args.benchmarks,
-        max_samples=None,  # Run on full benchmark datasets
-        use_test_execution=True,
-        log_prefix="baseline"
-    )
-    
-    # Log results to wandb for each benchmark
-    for benchmark_name, result in baseline_results.items():
-        metrics = result['metrics']
-        wandb.log({
-            f"baseline/{benchmark_name}_pass@1": metrics.get('pass@1', 0.0),
-            f"baseline/{benchmark_name}_syntax_score": metrics.get('syntax_score', 0.0),
-            f"baseline/{benchmark_name}_entry_point_score": metrics.get('entry_point_score', 0.0),
-            f"baseline/{benchmark_name}_truncation_rate": metrics.get('truncation_rate', 0.0),
-            f"baseline/{benchmark_name}_avg_tokens_generated": metrics.get('avg_tokens_generated', 0.0),
-            f"baseline/{benchmark_name}_tests_passed": metrics.get('tests_passed', 0),
-            f"baseline/{benchmark_name}_tests_run": metrics.get('tests_run', 0),
-        }, commit=False)
-    
-    print("\n✓ Baseline evaluation complete")
-    print("="*80 + "\n")
+    # Baseline: Evaluate base model (before LoRA training) on benchmarks
+    # Only run if benchmark_strategy is not 'none'
+    if args.benchmark_strategy != 'none':
+        print("\n" + "="*80)
+        print("BASELINE EVALUATION: Base Model (Before LoRA Training)")
+        print("="*80)
+        
+        # Run benchmark suite on base model
+        baseline_results = run_benchmark_suite(
+            model=model,
+            tokenizer=tokenizer,
+            benchmark_names=args.benchmarks,
+            max_samples=None,  # Run on full benchmark datasets
+            use_test_execution=True,
+            log_prefix="baseline"
+        )
+        
+        # Log results to wandb for each benchmark
+        for benchmark_name, result in baseline_results.items():
+            metrics = result['metrics']
+            wandb.log({
+                f"baseline/{benchmark_name}_pass@1": metrics.get('pass@1', 0.0),
+                f"baseline/{benchmark_name}_syntax_score": metrics.get('syntax_score', 0.0),
+                f"baseline/{benchmark_name}_entry_point_score": metrics.get('entry_point_score', 0.0),
+                f"baseline/{benchmark_name}_truncation_rate": metrics.get('truncation_rate', 0.0),
+                f"baseline/{benchmark_name}_avg_tokens_generated": metrics.get('avg_tokens_generated', 0.0),
+                f"baseline/{benchmark_name}_tests_passed": metrics.get('tests_passed', 0),
+                f"baseline/{benchmark_name}_tests_run": metrics.get('tests_run', 0),
+            }, commit=False)
+        
+        print("\n✓ Baseline evaluation complete")
+        print("="*80 + "\n")
+    else:
+        print("\nℹ Skipping baseline evaluation (benchmark_strategy='none')\n")
     
     # Prepare training data from loaded datasets
     print("\n--- Preparing Training Data from Loaded Datasets ---")
@@ -922,7 +1003,7 @@ def main(args):
         fp16=args.fp16,
         bf16=args.bf16,
         logging_dir='./logs_full',
-        logging_steps=50,
+        logging_steps=args.logging_steps,
         logging_strategy="steps",
         eval_strategy="epoch",
         save_strategy="epoch",
@@ -958,7 +1039,14 @@ def main(args):
     
     print(f"{'='*80}\n")
     
-    train_dataset = preprocess_training_dataset(tokenizer, train_data, pack=True, max_length=args.max_seq_length)
+    # Preprocess datasets - by default, drop truncated examples unless --keep_truncated is set
+    drop_truncated = not args.keep_truncated
+    if drop_truncated:
+        print("✓ Truncated examples will be DROPPED (use --keep_truncated to keep them)")
+    else:
+        print("⚠️  Truncated examples will be KEPT and truncated (may result in incomplete training data)")
+    
+    train_dataset = preprocess_training_dataset(tokenizer, train_data, pack=True, max_length=args.max_seq_length, drop_truncated=drop_truncated)
     val_dataset = preprocess_evaluation_dataset(tokenizer, Dataset.from_dict({"text": val_data}), max_length=args.max_seq_length)
     
     print(f"Training dataset: {len(train_dataset)} examples")
@@ -1009,6 +1097,16 @@ def main(args):
         DyLoRAMonitoringCallback(model, num_experts=model.expert_manager.num_experts),
     ]
     
+    # Add benchmark callback if strategy is 'epoch'
+    if args.benchmark_strategy == 'epoch':
+        callbacks.append(BenchmarkCallback(
+            model=model,
+            tokenizer=tokenizer,
+            benchmark_names=args.benchmarks,
+            use_test_execution=True
+        ))
+        print(f"✓ Epoch benchmarking enabled - will run {args.benchmarks} after each epoch")
+    
     # Conditionally add early stopping callback
     if not args.disable_early_stopping:
         callbacks.insert(0, EarlyStoppingCallback(
@@ -1042,32 +1140,38 @@ def main(args):
     trainer.train(resume_from_checkpoint=resume_checkpoint)
 
     # 8. Final evaluation on Benchmark Suite (after training)
-    print("\n" + "="*80)
-    print("FINAL EVALUATION: Trained Model (After LoRA Training)")
-    print("="*80)
-    
-    # Run benchmark suite on trained model
-    final_results = run_benchmark_suite(
-        model=model,
-        tokenizer=tokenizer,
-        benchmark_names=args.benchmarks,
-        max_samples=None,  # Run on full benchmark datasets
-        use_test_execution=True,
-        log_prefix="final"
-    )
-    
-    # Log results to wandb for each benchmark
-    for benchmark_name, result in final_results.items():
-        metrics = result['metrics']
-        wandb.log({
-            f"final/{benchmark_name}_pass@1": metrics.get('pass@1', 0.0),
-            f"final/{benchmark_name}_syntax_score": metrics.get('syntax_score', 0.0),
-            f"final/{benchmark_name}_entry_point_score": metrics.get('entry_point_score', 0.0),
-            f"final/{benchmark_name}_truncation_rate": metrics.get('truncation_rate', 0.0),
-            f"final/{benchmark_name}_avg_tokens_generated": metrics.get('avg_tokens_generated', 0.0),
-            f"final/{benchmark_name}_tests_passed": metrics.get('tests_passed', 0),
-            f"final/{benchmark_name}_tests_run": metrics.get('tests_run', 0),
-        }, commit=False)
+    # Only run if benchmark_strategy is 'final' or 'epoch' 
+    if args.benchmark_strategy in ['final', 'epoch']:
+        print("\n" + "="*80)
+        print("FINAL EVALUATION: Trained Model (After LoRA Training)")
+        print("="*80)
+        
+        # Run benchmark suite on trained model
+        final_results = run_benchmark_suite(
+            model=model,
+            tokenizer=tokenizer,
+            benchmark_names=args.benchmarks,
+            max_samples=None,  # Run on full benchmark datasets
+            use_test_execution=True,
+            log_prefix="final"
+        )
+        
+        # Log results to wandb for each benchmark
+        for benchmark_name, result in final_results.items():
+            metrics = result['metrics']
+            wandb.log({
+                f"final/{benchmark_name}_pass@1": metrics.get('pass@1', 0.0),
+                f"final/{benchmark_name}_syntax_score": metrics.get('syntax_score', 0.0),
+                f"final/{benchmark_name}_entry_point_score": metrics.get('entry_point_score', 0.0),
+                f"final/{benchmark_name}_truncation_rate": metrics.get('truncation_rate', 0.0),
+                f"final/{benchmark_name}_avg_tokens_generated": metrics.get('avg_tokens_generated', 0.0),
+                f"final/{benchmark_name}_tests_passed": metrics.get('tests_passed', 0),
+                f"final/{benchmark_name}_tests_run": metrics.get('tests_run', 0),
+            }, commit=False)
+        
+        print("\n✓ Final evaluation complete")
+    else:
+        print("\nℹ Skipping final evaluation (benchmark_strategy='none')\n")
     
     # Also evaluate loss on the first benchmark dataset for compatibility
     if args.benchmarks and len(args.benchmarks) > 0:
@@ -1178,8 +1282,11 @@ def parse_args(argv=None):
     parser.add_argument("--train_batch_size", type=int, default=4, help="Per-device training batch size.")
     parser.add_argument("--eval_batch_size", type=int, default=4, help="Per-device evaluation batch size.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Number of gradient accumulation steps (effective batch size = train_batch_size * gradient_accumulation_steps).")
+    parser.add_argument("--logging_steps", type=int, default=50, help="Number of steps between logging metrics to wandb and console.")
     parser.add_argument("--max_seq_length", type=int, default=2048, 
                         help="Maximum sequence length for tokenization (default: 2048, CodeGemma supports up to 8192)")
+    parser.add_argument("--keep_truncated", action="store_true", 
+                        help="Keep examples that exceed max_seq_length (they will be truncated). By default, truncated examples are dropped to avoid training on incomplete data.")
     parser.add_argument("--disable_early_stopping", action="store_true", help="Disable early stopping and train for all epochs.")
     parser.add_argument("--early_stopping_patience", type=int, default=3, help="Number of epochs with no improvement before stopping (only applies if early stopping is enabled).")
     parser.add_argument(
@@ -1193,6 +1300,8 @@ def parse_args(argv=None):
     )
     parser.add_argument("--benchmarks", type=str, nargs="+", default=["humanevalplus"],
                        help="Benchmarks to run for baseline and final evaluation: humaneval, humanevalplus, mbpp (default: humanevalplus)")
+    parser.add_argument("--benchmark-strategy", type=str, default="final", choices=["none", "epoch", "final"],
+                       help="Benchmarking strategy: 'none' (no benchmarks), 'epoch' (run after each epoch), 'final' (only baseline and final, default)")
     parser.add_argument("--data_prep_only", action="store_true",
                        help="Only perform data preparation and report statistics (including truncation analysis), then exit without training.")
     return parser.parse_args(argv)
