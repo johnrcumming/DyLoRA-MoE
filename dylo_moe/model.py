@@ -220,6 +220,9 @@ class DyLoRA_MoE(nn.Module):
             # Store routing weights for monitoring (detached copy)
             self.last_routing_weights = routing_weights.detach()
             
+            # Store non-detached copy for loss computation (to enable gradient flow)
+            self._routing_weights_for_loss = routing_weights
+            
             # Step 3: Set all experts as active for single-pass routing
             # Use ExpertManager's convenience method
             self.expert_manager.activate_all_experts()
@@ -244,9 +247,10 @@ class DyLoRA_MoE(nn.Module):
             lm_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             
             # Add load balancing auxiliary loss during training with multi-expert routing
-            if self.training and self.last_routing_weights is not None and self.balance_coefficient > 0:
+            if self.training and hasattr(self, '_routing_weights_for_loss') and self._routing_weights_for_loss is not None and self.balance_coefficient > 0:
                 # Compute load balancing loss to encourage uniform expert usage
-                balance_loss = self.compute_load_balancing_loss(self.last_routing_weights)
+                # Use non-detached routing_weights to enable gradient flow to router
+                balance_loss = self.compute_load_balancing_loss(self._routing_weights_for_loss)
                 
                 # Total loss = language modeling loss + weighted load balancing loss
                 loss = lm_loss + self.balance_coefficient * balance_loss
