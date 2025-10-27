@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
+from peft import PeftModel, PeftMixedModel
 from .router import DynamicHybridRouter
 from .expert import ExpertManager
 from .novelty_detector import NoveltyDetector
@@ -199,55 +200,44 @@ class DyLoRA_MoE(nn.Module):
             )
             logits = outputs.logits
             
-        # Multi-expert routing (for inference or when expert_id not specified)
+        # Multi-expert routing with PEFT's single-pass routing_weights
         else:
-            # FIXED: Maintain computational graph through single forward pass
-            # Get full model outputs once (not per expert)
-            outputs = self.foundation_model(
+            # Step 1: Get hidden states from initial forward pass
+            # We need hidden states to compute routing weights
+            # NOTE: This is 2 forward passes (1 for hidden states, 1 with routing)
+            # but still better than the old N+1 passes (1 + N expert loops)
+            base_outputs = self.foundation_model(
                 input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
                 use_cache=False,
             )
-            hidden_states = outputs.hidden_states[-1]
+            hidden_states = base_outputs.hidden_states[-1]
             
-            # Compute routing weights (keep in computational graph)
-            routing_weights = self.router(hidden_states)
-            
-            # Both training and evaluation need to combine experts via routing
-            # The only difference is whether we need gradients (training) or not (eval)
-            
-            # Memory-efficient: accumulate weighted expert outputs instead of stacking
-            # Average routing weights across sequence for per-example expert weights
-            expert_weights = routing_weights.mean(dim=1)  # [batch, num_experts]
-            
-            # Initialize accumulated logits
-            logits = None
-            
-            for i in range(self.router.num_experts):
-                self.expert_manager.set_active_expert(i)
-                expert_out = self.foundation_model(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=False,
-                    use_cache=False,
-                )
-                
-                # Weight expert output by routing weight: [batch, seq, vocab]
-                # expert_weights[:, i] is [batch], unsqueeze to [batch, 1, 1] for broadcasting
-                weighted_logits = expert_out.logits * expert_weights[:, i].unsqueeze(1).unsqueeze(2)
-                
-                # Accumulate (sum) weighted outputs
-                if logits is None:
-                    logits = weighted_logits
-                else:
-                    logits = logits + weighted_logits
-                
-                # Free memory immediately
-                del expert_out, weighted_logits
+            # Step 2: Compute routing weights from hidden states (with gradients!)
+            routing_weights = self.router(hidden_states)  # [batch, seq_len, num_experts]
             
             # Store routing weights for monitoring (detached copy)
             self.last_routing_weights = routing_weights.detach()
+            
+            # Step 3: Set all experts as active for single-pass routing
+            # This tells PEFT to use all adapters and combine via routing_weights
+            all_expert_names = [f"expert_{i}" for i in range(self.expert_manager.num_experts)]
+            if isinstance(self.foundation_model, (PeftModel, PeftMixedModel)):
+                # Enable all adapters for MoE routing
+                # Use base_model.set_adapter() which accepts list[str]
+                self.foundation_model.base_model.set_adapter(all_expert_names)
+            
+            # Step 4: Single forward pass with routing_weights
+            # PEFT will automatically combine expert outputs weighted by routing_weights
+            outputs = self.foundation_model(
+                input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                use_cache=False,
+                routing_weights=routing_weights,  # PEFT's MoE routing
+            )
+            logits = outputs.logits
 
         # Compute loss
         loss = None
