@@ -107,3 +107,63 @@ class ExpertManager:
             for name, param in self.model.named_parameters():
                 if name in weights:
                     param.data.copy_(weights[name])
+    
+    def get_all_adapter_names(self) -> List[str]:
+        """
+        Returns a list of all expert adapter names.
+        
+        This is useful for MoE routing where all experts need to be active simultaneously.
+        
+        Returns:
+            List[str]: List of adapter names in format ["expert_0", "expert_1", ...]
+            
+        Example:
+            ```py
+            # Get all adapter names for MoE routing
+            adapter_names = expert_manager.get_all_adapter_names()
+            # ["expert_0", "expert_1", "expert_2", "expert_3"]
+            
+            # Set all adapters as active in PEFT
+            model.base_model.set_adapter(adapter_names)
+            ```
+        """
+        return [f"expert_{i}" for i in range(self.num_experts)]
+    
+    def activate_all_experts(self) -> List[str]:
+        """
+        Activates all expert adapters simultaneously for MoE routing.
+        
+        This method sets all expert adapters as active in the PEFT model, which is
+        required for single-pass MoE routing where routing_weights are used to
+        combine multiple expert outputs in a single forward pass.
+        
+        Returns:
+            List[str]: List of activated adapter names
+            
+        Example:
+            ```py
+            # Activate all experts for MoE routing
+            active_adapters = expert_manager.activate_all_experts()
+            
+            # Now forward pass can use routing_weights
+            outputs = model(input_ids, routing_weights=routing_weights)
+            ```
+            
+        Note:
+            - This is different from set_active_expert() which activates only one expert
+            - After calling this, all experts will be used in forward passes
+            - For single-expert training, use set_active_expert(expert_id) instead
+        """
+        if not isinstance(self.model, (PeftModel, PeftMixedModel)):
+            return []
+        
+        all_adapter_names = self.get_all_adapter_names()
+        
+        # Set all adapters as active using PEFT's BaseTuner.set_adapter()
+        # which accepts a list of adapter names
+        self.model.base_model.set_adapter(all_adapter_names)
+        
+        # Update current_expert_id to None to indicate multi-expert mode
+        self.current_expert_id = None
+        
+        return all_adapter_names

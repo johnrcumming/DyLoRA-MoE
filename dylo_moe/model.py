@@ -221,12 +221,8 @@ class DyLoRA_MoE(nn.Module):
             self.last_routing_weights = routing_weights.detach()
             
             # Step 3: Set all experts as active for single-pass routing
-            # This tells PEFT to use all adapters and combine via routing_weights
-            all_expert_names = [f"expert_{i}" for i in range(self.expert_manager.num_experts)]
-            if isinstance(self.foundation_model, (PeftModel, PeftMixedModel)):
-                # Enable all adapters for MoE routing
-                # Use base_model.set_adapter() which accepts list[str]
-                self.foundation_model.base_model.set_adapter(all_expert_names)
+            # Use ExpertManager's convenience method
+            self.expert_manager.activate_all_experts()
             
             # Step 4: Single forward pass with routing_weights
             # PEFT will automatically combine expert outputs weighted by routing_weights
