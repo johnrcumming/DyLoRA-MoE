@@ -768,11 +768,15 @@ def main(args):
         balance_coefficient=args.balance_coefficient  # Load balancing auxiliary loss coefficient
     )
     
-    # Mark all experts as mature so router uses sparse delegation from the start
+    # Configure expert maturity for training strategy
+    # Keep experts immature (0) for dense routing during training
+    # This ensures all experts receive gradients and prevents early collapse to single expert
     for i in range(model.expert_manager.num_experts):
-        model.router.set_expert_maturity(i, 1)
+        model.router.set_expert_maturity(i, 0)  # Keep immature for dense collaboration
     
-    print(f"Initialized {model.expert_manager.num_experts} experts (all marked as mature)")
+    print(f"Initialized {model.expert_manager.num_experts} experts (keeping immature for dense training)")
+    print(f"⚠️  Router will use DENSE (softmax) routing during training to prevent expert collapse")
+    print(f"   All experts will receive gradients. Sparse (top-k) routing only used at inference.")
     
     # Ensure all LoRA parameters are trainable
     print("\n--- Verifying trainable parameters ---")
@@ -1273,7 +1277,7 @@ def parse_args(argv=None):
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA r value.")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha value.")
     parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout value.")
-    parser.add_argument("--balance_coefficient", type=float, default=0.01, help="Coefficient for load balancing auxiliary loss (0 to disable).")
+    parser.add_argument("--balance_coefficient", type=float, default=0.15, help="Coefficient for load balancing auxiliary loss (0.1-0.5 recommended to prevent expert collapse; 0 to disable).")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay (L2 regularization) coefficient to prevent overfitting (default: 0.01).")
     parser.add_argument("--label_smoothing", type=float, default=0.0, help="Label smoothing factor to prevent overfitting (typical: 0.1, range: 0.0-0.3).")
     parser.add_argument("--interleaved_sampling", action="store_true", help="Use interleaved sampling for balanced dataset representation (50/50 Code Alpaca and MBPP).")
