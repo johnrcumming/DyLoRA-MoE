@@ -87,6 +87,8 @@ All structure scores are **0%**, yet pass@1 is **100%**. This is impossible for 
 
 ## Fix Applied
 
+### Fix 1: Remove Aggressive Repetition Penalty
+
 **File**: `benchmarks/base_benchmark.py` (lines 218-227)
 
 **Change**:
@@ -113,6 +115,36 @@ default_kwargs = {
 }
 ```
 
+### Fix 2: Check Structure of Tested Code, Not Raw Completion
+
+**File**: `benchmarks/humanevalplus_benchmark.py` (lines 86-88 and 143-145)
+
+**Problem**: Structure checks (`has_function_def`, `has_entry_point`, `has_return`) were checking the raw `completion`, but tests execute `function_code` (sanitized from `prompt + completion`). This caused:
+
+- **20.12% function_def_score** (only 20% of completions had `def`)
+- **50.61% pass@1** (50% of tests passed)
+- **Mismatch**: Tests passed using functions extracted from `prompt + completion`, but structure scores only saw raw completion
+
+**Change**:
+```python
+# BEFORE (incorrect - checks raw completion):
+has_entry_point = entry_point in completion if entry_point else False
+has_function_def = bool(re.search(r'def\s+\w+', completion))
+has_return = 'return' in completion
+
+# AFTER (fixed - checks what actually gets tested):
+has_entry_point = entry_point in function_code if entry_point else False
+has_function_def = bool(re.search(r'def\s+\w+', function_code))
+has_return = 'return' in function_code
+```
+
+**Why This Matters**:
+- `completion` = Raw model output (may have extra text, be incomplete)
+- `function_code` = `sanitize(prompt + completion)` = What actually runs in tests
+- Structure scores should reflect what gets tested, not what was generated
+
+This fix ensures structure scores and pass@1 are measuring the same thing.
+
 **Additional Debug Logging**:
 Added sample logging in `humanevalplus_benchmark.py` (lines 53-72) to inspect:
 - Prompt length
@@ -122,16 +154,27 @@ Added sample logging in `humanevalplus_benchmark.py` (lines 53-72) to inspect:
 
 ## Expected Behavior After Fix
 
-**Baseline should now show**:
-- **Lower pass@1** (~15-25%, closer to published 20.7%)
-- **Higher token counts** (200-500 tokens for complete implementations)
-- **Non-zero structure scores** (syntax, entry_point, function_def)
-- **Realistic progression** through training epochs
+**After removing repetition_penalty (Fix 1 only)**:
+- **pass@1**: 50.61% (still higher than published 20.7%)
+- **Token counts**: 625.5 avg (✓ realistic, was 8.8)
+- **Structure scores**: Mismatched with pass@1:
+  - syntax_score: 38.01%
+  - function_def_score: 20.12%
+  - entry_point_score: 9.76%
+  - return_score: 84.15%
+
+**After both fixes (repetition_penalty + structure check)**:
+- **Structure scores should align with pass@1** (both measuring same code)
+- **Expected baseline**: ~20-30% pass@1 (closer to published 20.7%)
+- **Structure scores**: Should correlate with pass@1:
+  - If pass@1 is 25%, function_def_score should be ~25% (not 20% vs 50%)
+  - All scores should improve/decline together during training
 
 **Training epochs should show**:
 - **Gradual improvement** in pass@1 from baseline
-- **Balanced token generation** (not hitting 1024 limit every time)
-- **Improved structure scores** as model learns proper code formatting
+- **Correlated structure scores** (all improve together as model learns)
+- **Balanced token generation** (200-500 tokens, not hitting 4096 limit)
+- **Realistic progression** that makes logical sense
 
 ## Testing Recommendations
 

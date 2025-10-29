@@ -83,10 +83,15 @@ class HumanEvalPlusBenchmark(BaseBenchmark):
                 print(f"  Completion length: {len(completion)}")
                 print(f"  Completion preview: {completion[:200] if completion else '(empty)'}")
         
-        # Basic checks
-        has_entry_point = entry_point in completion if entry_point else False
-        has_function_def = bool(re.search(r'def\s+\w+', completion))
-        has_return = 'return' in completion
+        # Basic checks on function_code (what actually gets tested), not raw completion
+        # IMPORTANT: Check function_code, not completion, because:
+        # 1. function_code is what gets executed in tests (after sanitization)
+        # 2. completion may contain extra text, comments, or multiple functions
+        # 3. Checking completion led to mismatch: 20% had "def" but 50% passed tests
+        #    (because sanitizer extracted valid functions from prompt+completion)
+        has_entry_point = entry_point in function_code if entry_point else False
+        has_function_def = bool(re.search(r'def\s+\w+', function_code))
+        has_return = 'return' in function_code
         
         # Execute tests if we have test code and test execution is enabled
         test_passed = False
@@ -136,10 +141,10 @@ class HumanEvalPlusBenchmark(BaseBenchmark):
         # Use EvalPlus sanitization to extract function code
         function_code = self.sanitize_completion(completion, prompt, entry_point)
         
-        # Basic checks
-        has_entry_point = entry_point in completion if entry_point else False
-        has_function_def = bool(re.search(r'def\s+\w+', completion))
-        has_return = 'return' in completion
+        # Basic checks on function_code (what actually gets tested), not raw completion
+        has_entry_point = entry_point in function_code if entry_point else False
+        has_function_def = bool(re.search(r'def\s+\w+', function_code))
+        has_return = 'return' in function_code
         
         return {
             'task_id': task_id,
