@@ -25,6 +25,9 @@ class DyLoRA_MoE(nn.Module):
         # Disable caching to avoid DynamicCache objects in evaluation padding
         if hasattr(self.foundation_model.config, 'use_cache'):
             self.foundation_model.config.use_cache = False
+        
+        # Expose config for Trainer compatibility
+        self.config = self.foundation_model.config
 
         # 2. Untie lm_head if tied
         if getattr(self.foundation_model.config, "tie_word_embeddings", False):

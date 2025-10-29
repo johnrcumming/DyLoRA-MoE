@@ -614,9 +614,9 @@ def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use
     """
     # Initialize available benchmarks with fixed high token limits (no adaptive adjustment)
     available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=4096, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=False),
-        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=4096, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=False),
-        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=4096, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=False)
+        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=1024, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=False),
+        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=1024, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=False),
+        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=1024, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=False)
     }
     
     # Validate requested benchmarks
@@ -996,12 +996,13 @@ def main(args):
         gradient_accumulation_steps=args.gradient_accumulation_steps,  # Configurable: effective batch size = train_batch_size * gradient_accumulation_steps
         gradient_checkpointing=False,  # DISABLED: Breaks gradient flow with multi-expert routing
         learning_rate=learning_rate,  # Adaptive based on training duration
-        weight_decay=0.01,
+        weight_decay=args.weight_decay,  # Configurable L2 regularization
         warmup_ratio=warmup_ratio,  # Adaptive based on training duration
         lr_scheduler_type=lr_strategy,
         lr_scheduler_kwargs=scheduler_kwargs,
         fp16=args.fp16,
         bf16=args.bf16,
+        label_smoothing_factor=args.label_smoothing,  # Prevent overfitting by smoothing targets
         logging_dir='./logs_full',
         logging_steps=args.logging_steps,
         logging_strategy="steps",
@@ -1009,7 +1010,7 @@ def main(args):
         save_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,
-        metric_for_best_model="loss",  # Fixed: use "loss" not "eval_loss"
+        metric_for_best_model="eval_loss",  # Track validation loss to prevent overfitting
         greater_is_better=False,
         report_to="wandb",
         remove_unused_columns=True,
@@ -1273,6 +1274,8 @@ def parse_args(argv=None):
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha value.")
     parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout value.")
     parser.add_argument("--balance_coefficient", type=float, default=0.01, help="Coefficient for load balancing auxiliary loss (0 to disable).")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay (L2 regularization) coefficient to prevent overfitting (default: 0.01).")
+    parser.add_argument("--label_smoothing", type=float, default=0.0, help="Label smoothing factor to prevent overfitting (typical: 0.1, range: 0.0-0.3).")
     parser.add_argument("--interleaved_sampling", action="store_true", help="Use interleaved sampling for balanced dataset representation (50/50 Code Alpaca and MBPP).")
     parser.add_argument("--cosine_restarts", action="store_true", help="Use cosine_with_restarts learning rate scheduler with 2 cycles for better exploration.")
     parser.add_argument("--lr_strategy", type=str, default="auto", choices=["auto", "constant", "linear", "cosine", "cosine_restarts"], 

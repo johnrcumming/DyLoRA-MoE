@@ -53,6 +53,25 @@ class HumanEvalPlusBenchmark(BaseBenchmark):
         # Use EvalPlus sanitization to extract function code
         function_code = self.sanitize_completion(completion, prompt, entry_point)
         
+        # Debug: Log what's being evaluated (first 5 samples only to avoid spam)
+        if not hasattr(self, '_logged_sample_count'):
+            self._logged_sample_count = 0
+        
+        if self._logged_sample_count < 5:
+            self._logged_sample_count += 1
+            print(f"\n{'='*80}")
+            print(f"DEBUG Sample {self._logged_sample_count}: {task_id}")
+            print(f"{'='*80}")
+            print(f"Prompt length: {len(prompt)} chars")
+            print(f"Completion length: {len(completion)} chars")
+            print(f"Completion tokens: {gen_metadata.get('num_tokens', 0)}")
+            print(f"Function code extracted: {len(function_code)} chars")
+            print(f"\nCompletion preview (first 200 chars):")
+            print(completion[:200] if completion else "(empty)")
+            print(f"\nFunction code preview (first 300 chars):")
+            print(function_code[:300] if function_code else "(empty)")
+            print(f"{'='*80}\n")
+        
         # Debug: Check why function_code might be empty
         if self.use_test_execution and test and not function_code:
             # Log first occurrence for debugging

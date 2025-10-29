@@ -218,6 +218,9 @@ class BaseBenchmark(ABC):
                 'max_new_tokens': max_tokens,
                 'temperature': 0.0,
                 'do_sample': False,
+                # NOTE: repetition_penalty removed - was causing baseline to generate only ~8.8 tokens
+                # which led to inflated pass@1 scores (99.39%) by relying on function signatures from prompts.
+                # Models should generate complete implementations without penalties at baseline.
                 'pad_token_id': self.tokenizer.pad_token_id,
                 'eos_token_id': self.tokenizer.eos_token_id,
             }
