@@ -45,6 +45,7 @@ class AsyncTestExecutor:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.submitted_count = 0
         self.completed_count = 0
+        self.pending_futures = []  # Track active futures for accurate pending count
         
     def submit_test(
         self, 
@@ -65,6 +66,7 @@ class AsyncTestExecutor:
         submission_index = self.submitted_count
         self.submitted_count += 1
         future = self.executor.submit(test_func, *args, **kwargs)
+        self.pending_futures.append(future)  # Track for accurate pending count
         return future, submission_index
     
     def get_result(self, future: Future, timeout: Optional[float] = None) -> Any:
@@ -90,8 +92,14 @@ class AsyncTestExecutor:
             raise e
     
     def get_pending_count(self) -> int:
-        """Get number of tests currently pending."""
-        return self.submitted_count - self.completed_count
+        """Get number of tests currently pending (actually running or queued).
+        
+        This checks the actual state of submitted futures rather than relying
+        on a counter that only updates when get_result() is called.
+        """
+        # Clean up completed futures and count remaining
+        self.pending_futures = [f for f in self.pending_futures if not f.done()]
+        return len(self.pending_futures)
     
     def shutdown(self, wait: bool = True):
         """Shutdown the executor and cleanup resources.
@@ -473,7 +481,8 @@ class BaseBenchmark(ABC):
                 # Log progress periodically
                 if (i + 1) % 20 == 0:
                     pending_count = executor.get_pending_count()
-                    print(f"  Generated {i + 1}/{len(dataset)}, {tests_submitted} tests submitted, {pending_count} tests pending")
+                    completed_count = tests_submitted - pending_count
+                    print(f"  Generated {i + 1}/{len(dataset)}, {tests_submitted} tests submitted, {completed_count} completed, {pending_count} pending")
                 
             except Exception as e:
                 print(f"  ⚠️  Error generating sample {i}: {e}")
