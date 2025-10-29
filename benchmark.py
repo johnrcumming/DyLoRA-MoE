@@ -2,15 +2,18 @@
 """
 DyLoRA-MoE Benchmark Suite
 
-Comprehensive benchmarking system for code generation models.
+Comprehensive benchmarking system for code generation models using EvalPlus framework.
 Supports comparing base models with trained models (local or W&B artifacts).
-By default, results are logged to Weights & Biases (use --no_wandb to disable).
+By default, uses EvalPlus for accurate, standardized evaluation comparable to published benchmarks.
 
 Usage:
-    # Compare base model with local trained model (uses google/codegemma-2b by default)
+    # Basic evaluation with EvalPlus (default)
+    python benchmark.py --benchmarks humaneval
+
+    # Compare base model with local trained model
     python benchmark.py --trained_model ./results_full/best_model
 
-    # Compare base model with W&B artifact (uses google/codegemma-2b by default)
+    # Compare base model with W&B artifact
     python benchmark.py --wandb_artifact "user/project/artifact:v0"
 
     # Run specific benchmarks with custom base model
@@ -19,11 +22,14 @@ Usage:
     # Run MBPP benchmark only
     python benchmark.py --benchmarks mbpp --max_samples 500
 
-    # Full evaluation (all samples, all benchmarks, uses default base model)
-    python benchmark.py --benchmarks humaneval humanevalplus mbpp --max_samples 500
+    # Full evaluation (all samples, all benchmarks)
+    python benchmark.py --benchmarks humaneval mbpp
 
-    # Quick test (subset, disable W&B logging, uses default base model)
-    python benchmark.py --max_samples 20 --no_wandb
+    # Quick test (subset, disable W&B logging)
+    python benchmark.py --max_samples 10 --no_wandb
+    
+    # Use legacy custom benchmarks instead of EvalPlus (not recommended, async tests enabled by default)
+    python benchmark.py --no_evalplus
 """
 
 import os
@@ -43,6 +49,7 @@ from dylo_moe.device_utils import get_device_map, get_torch_dtype, print_device_
 from benchmarks.humaneval_benchmark import HumanEvalBenchmark
 from benchmarks.humanevalplus_benchmark import HumanEvalPlusBenchmark
 from benchmarks.mbpp_benchmark import MBPPBenchmark
+from benchmarks.evalplus_benchmark import EvalPlusBenchmark
 
 # Global dtype override (set by command-line flags)
 _dtype_override: Optional[str] = None
@@ -461,50 +468,119 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
 
 def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list, 
                   max_samples: Optional[int] = None, log_to_wandb: bool = False,
-                  use_async_tests: bool = False, max_concurrent_tests: Optional[int] = None) -> Dict[str, Any]:
-    """Run all specified benchmarks on all models."""
+                  use_async_tests: bool = False, max_concurrent_tests: Optional[int] = None,
+                  use_evalplus: bool = False, evalplus_backend: str = "hf",
+                  model_name_for_evalplus: Optional[str] = None) -> Dict[str, Any]:
+    """Run all specified benchmarks on all models.
     
-    # Initialize available benchmarks with fixed high token limits (no adaptive adjustment)
-    available_benchmarks = {
-        'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False,
-                                       use_async_tests=use_async_tests, max_concurrent_tests=max_concurrent_tests),
-        'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False,
-                                               use_async_tests=use_async_tests, max_concurrent_tests=max_concurrent_tests),
-        'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False,
-                             use_async_tests=use_async_tests, max_concurrent_tests=max_concurrent_tests)
-    }
+    Args:
+        models: Dict of model_name -> model
+        tokenizer: HuggingFace tokenizer
+        benchmarks: List of benchmark names to run
+        max_samples: Max samples per benchmark
+        log_to_wandb: Whether to log to W&B
+        use_async_tests: Enable async test execution (ignored if use_evalplus=True)
+        max_concurrent_tests: Max concurrent tests (ignored if use_evalplus=True)
+        use_evalplus: Use native EvalPlus framework
+        evalplus_backend: EvalPlus backend (hf, vllm, etc.)
+        model_name_for_evalplus: Model name/path for EvalPlus (required if use_evalplus=True)
+    """
     
-    # Validate requested benchmarks
-    for benchmark_name in benchmarks:
-        if benchmark_name not in available_benchmarks:
-            raise ValueError(f"Unknown benchmark: {benchmark_name}. Available: {list(available_benchmarks.keys())}")
-    
-    # Run benchmarks
-    all_results = {}
-    
-    for model_name, model in models.items():
-        if model is None:
-            print(f"⚠️  Skipping {model_name} (failed to load)")
-            continue
-            
-        model_results = {}
+    if use_evalplus:
+        # Use native EvalPlus benchmarks
+        if not model_name_for_evalplus:
+            raise ValueError("model_name_for_evalplus is required when use_evalplus=True")
         
+        # Map benchmark names to EvalPlus datasets
+        evalplus_dataset_map = {
+            'humaneval': 'humaneval',
+            'humanevalplus': 'humaneval',  # EvalPlus uses 'humaneval' for both
+            'mbpp': 'mbpp'
+        }
+        
+        all_results = {}
+        
+        for model_name, model in models.items():
+            if model is None:
+                print(f"⚠️  Skipping {model_name} (failed to load)")
+                continue
+            
+            model_results = {}
+            
+            for benchmark_name in benchmarks:
+                if benchmark_name not in evalplus_dataset_map:
+                    raise ValueError(f"Unknown benchmark for EvalPlus: {benchmark_name}")
+                
+                evalplus_dataset = evalplus_dataset_map[benchmark_name]
+                
+                # Create EvalPlus benchmark instance
+                benchmark = EvalPlusBenchmark(
+                    tokenizer=tokenizer,
+                    model_name=model_name_for_evalplus,
+                    dataset=evalplus_dataset,
+                    max_new_tokens=4096,
+                    greedy=True,
+                    backend=evalplus_backend,
+                    force_base_prompt=False,
+                    mini=False
+                )
+                
+                # Run benchmark (model is passed but not directly used by EvalPlus)
+                result = benchmark.run_benchmark(
+                    model=model,
+                    max_samples=max_samples,
+                    log_to_wandb=log_to_wandb,
+                    prefix=model_name
+                )
+                
+                model_results[benchmark_name] = result
+            
+            all_results[model_name] = model_results
+        
+        return all_results
+    
+    else:
+        # Use legacy custom benchmarks
+        available_benchmarks = {
+            'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False,
+                                           use_async_tests=use_async_tests, max_concurrent_tests=max_concurrent_tests),
+            'humanevalplus': HumanEvalPlusBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False,
+                                                   use_async_tests=use_async_tests, max_concurrent_tests=max_concurrent_tests),
+            'mbpp': MBPPBenchmark(tokenizer, max_new_tokens=4096, use_adaptive_tokens=False,
+                                 use_async_tests=use_async_tests, max_concurrent_tests=max_concurrent_tests)
+        }
+        
+        # Validate requested benchmarks
         for benchmark_name in benchmarks:
-            benchmark = available_benchmarks[benchmark_name]
-            
-            # Run benchmark
-            result = benchmark.run_benchmark(
-                model=model,
-                max_samples=max_samples,
-                log_to_wandb=log_to_wandb,
-                prefix=model_name
-            )
-            
-            model_results[benchmark_name] = result
+            if benchmark_name not in available_benchmarks:
+                raise ValueError(f"Unknown benchmark: {benchmark_name}. Available: {list(available_benchmarks.keys())}")
         
-        all_results[model_name] = model_results
-    
-    return all_results
+        # Run benchmarks
+        all_results = {}
+        
+        for model_name, model in models.items():
+            if model is None:
+                print(f"⚠️  Skipping {model_name} (failed to load)")
+                continue
+                
+            model_results = {}
+            
+            for benchmark_name in benchmarks:
+                benchmark = available_benchmarks[benchmark_name]
+                
+                # Run benchmark
+                result = benchmark.run_benchmark(
+                    model=model,
+                    max_samples=max_samples,
+                    log_to_wandb=log_to_wandb,
+                    prefix=model_name
+                )
+                
+                model_results[benchmark_name] = result
+            
+            all_results[model_name] = model_results
+        
+        return all_results
 
 
 def compare_results(results: Dict[str, Any], benchmarks: list):
@@ -622,10 +698,18 @@ def parse_args(argv=None):
                        help="Benchmarks to run: humaneval, humanevalplus, mbpp (default: humaneval)")
     parser.add_argument("--max_samples", type=int, default=None,
                        help="Maximum samples per benchmark (default: all - HumanEval=164, HumanEval+=164, MBPP=500)")
-    parser.add_argument("--use_async_tests", action="store_true",
-                       help="Enable async test execution for improved GPU utilization (default: disabled)")
+    parser.add_argument("--use_evalplus", action="store_true", default=True,
+                       help="Use native EvalPlus framework for generation and evaluation (default: enabled)")
+    parser.add_argument("--no_evalplus", action="store_false", dest="use_evalplus",
+                       help="Disable EvalPlus and use legacy custom benchmarks")
+    parser.add_argument("--evalplus_backend", type=str, default="hf",
+                       help="EvalPlus backend: hf (HuggingFace), vllm, etc. (default: hf)")
+    parser.add_argument("--use_async_tests", action="store_true", default=True,
+                       help="Enable async test execution for improved GPU utilization (default: enabled for legacy benchmarks with --no_evalplus)")
+    parser.add_argument("--no_async_tests", action="store_false", dest="use_async_tests",
+                       help="Disable async test execution (only affects legacy benchmarks with --no_evalplus)")
     parser.add_argument("--max_concurrent_tests", type=int, default=None,
-                       help="Max concurrent test processes for async mode (default: cpu_count() // 2)")
+                       help="Max concurrent test processes for async mode (default: cpu_count()//2, only for legacy benchmarks with --no_evalplus)")
     
     # Environment arguments
     parser.add_argument("--hf_token", type=str, default=None,
@@ -770,9 +854,28 @@ def main(args=None):
         print(f"Models: {list(models.keys())}")
         print(f"Benchmarks: {args.benchmarks}")
         print(f"Max samples: {args.max_samples or 'all'}")
-        if args.use_async_tests:
+        if args.use_evalplus:
+            print(f"Using EvalPlus framework (backend: {args.evalplus_backend})")
+        elif args.use_async_tests:
             print(f"Async test execution: enabled (max workers: {args.max_concurrent_tests or 'auto'})")
         print(f"{'='*100}")
+        
+        # Determine model name for EvalPlus
+        model_name_for_evalplus = None
+        if args.use_evalplus:
+            # Use the actual model path/name for EvalPlus
+            if args.trained_model:
+                # For trained models, we need the base model name since EvalPlus loads from HF
+                # Try to get it from config, otherwise use args.model_name
+                model_name_for_evalplus = get_base_model_from_config(args.trained_model) or args.model_name
+            elif args.wandb_artifact:
+                # Similar for W&B artifacts
+                model_name_for_evalplus = args.model_name
+            else:
+                # For base model, use the model_name directly
+                model_name_for_evalplus = args.model_name
+            
+            print(f"EvalPlus will use model: {model_name_for_evalplus}")
         
         results = run_benchmarks(
             models=models,
@@ -781,7 +884,10 @@ def main(args=None):
             max_samples=args.max_samples,
             log_to_wandb=log_to_wandb,
             use_async_tests=args.use_async_tests,
-            max_concurrent_tests=args.max_concurrent_tests
+            max_concurrent_tests=args.max_concurrent_tests,
+            use_evalplus=args.use_evalplus,
+            evalplus_backend=args.evalplus_backend,
+            model_name_for_evalplus=model_name_for_evalplus
         )
         
         # Compare results
