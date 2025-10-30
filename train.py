@@ -23,10 +23,11 @@ from typing import Union, Dict, Iterable, Any
 
 from dylo_moe.model import DyLoRA_MoE
 from dylo_moe.utils import print_trainable_parameters, save_dylo_moe_state, save_lora_experts
-from dylo_moe.device_utils import move_model_to_device, print_device_info
+from dylo_moe.device_utils import move_model_to_device, print_device_info, get_device
 from benchmarks.humaneval_benchmark import HumanEvalBenchmark
 from benchmarks.humanevalplus_benchmark import HumanEvalPlusBenchmark
 from benchmarks.mbpp_benchmark import MBPPBenchmark
+from benchmarks.evalplus_benchmark import EvalPlusBenchmark
 from data.prepare_data import (
     download_mbpp, 
     download_code_alpaca,
@@ -300,18 +301,25 @@ class BenchmarkCallback(TrainerCallback):
     Only used when benchmark_strategy='epoch'.
     """
     
-    def __init__(self, model, tokenizer, benchmark_names, use_test_execution=True):
+    def __init__(self, model, tokenizer, benchmark_names, use_test_execution=True, 
+                 use_evalplus=True, evalplus_backend="hf", model_name=None):
         self.model = model
         self.tokenizer = tokenizer
         self.benchmark_names = benchmark_names
         self.use_test_execution = use_test_execution
+        self.use_evalplus = use_evalplus
+        self.evalplus_backend = evalplus_backend
+        self.model_name = model_name
         
     def on_epoch_end(self, args, state, control, **kwargs):
         """Called at the end of each epoch to run benchmarks."""
+        from dylo_moe.device_utils import get_device
         epoch = int(state.epoch) if state.epoch is not None else 0
+        device = get_device()
         
         print(f"\n{'='*80}")
         print(f"EPOCH {epoch} EVALUATION")
+        print(f"Benchmarking device: {device.upper()}")
         print(f"{'='*80}")
         
         # Run benchmark suite
@@ -322,7 +330,10 @@ class BenchmarkCallback(TrainerCallback):
             benchmark_names=self.benchmark_names,
             max_samples=None,
             use_test_execution=self.use_test_execution,
-            log_prefix=f"epoch_{epoch}"
+            log_prefix=f"epoch_{epoch}",
+            use_evalplus=self.use_evalplus,
+            evalplus_backend=self.evalplus_backend,
+            model_name=self.model_name
         )
         
         # Log results to wandb for each benchmark
@@ -597,7 +608,8 @@ def preprocess_training_dataset(tokenizer, skill_data, pack=True, max_length: in
     return dataset
 
 
-def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use_test_execution=True, log_prefix=""):
+def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use_test_execution=True, log_prefix="", 
+                       use_evalplus=True, evalplus_backend="hf", model_name=None):
     """
     Run multiple benchmarks on a model and return aggregated results.
     
@@ -608,10 +620,68 @@ def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use
         max_samples: Maximum number of samples to evaluate per benchmark
         use_test_execution: If True, use actual test execution for Pass@1 (slower but accurate)
         log_prefix: Prefix for logging (e.g., "baseline", "final")
+        use_evalplus: If True, use EvalPlus framework (default: True)
+        evalplus_backend: Backend for EvalPlus ('hf', 'vllm', 'openai', etc.)
+        model_name: Model name for EvalPlus (required when use_evalplus=True)
     
     Returns:
         dict: Contains results for each benchmark with metrics and samples
     """
+    if use_evalplus:
+        # Use EvalPlus framework for accurate evaluation
+        if not model_name:
+            print("⚠️  Warning: model_name required for EvalPlus. Falling back to legacy benchmarks.")
+            use_evalplus = False
+        else:
+            print(f"\n{'='*80}")
+            print(f"Using EvalPlus Framework (backend: {evalplus_backend})")
+            print(f"Model: {model_name}")
+            print(f"Benchmarks: {', '.join(benchmark_names)}")
+            print(f"Max samples per benchmark: {max_samples or 'all'}")
+            print(f"{'='*80}")
+            
+            all_results = {}
+            
+            # Map benchmark names to EvalPlus datasets
+            dataset_map = {
+                'humaneval': 'humaneval',
+                'humanevalplus': 'humaneval',
+                'mbpp': 'mbpp'
+            }
+            
+            for benchmark_name in benchmark_names:
+                if benchmark_name not in dataset_map:
+                    print(f"⚠️  Warning: '{benchmark_name}' not supported by EvalPlus. Skipping.")
+                    continue
+                
+                dataset = dataset_map[benchmark_name]
+                print(f"\n--- Running {benchmark_name.upper()} with EvalPlus ---")
+                
+                # Initialize EvalPlus benchmark
+                evalplus_bench = EvalPlusBenchmark(
+                    model_name=model_name,
+                    dataset=dataset,
+                    backend=evalplus_backend,
+                    greedy=True
+                )
+                
+                # Run benchmark
+                result = evalplus_bench.run_benchmark(max_samples=max_samples)
+                all_results[benchmark_name] = result
+                
+                # Print summary
+                metrics = result.get('metrics', {})
+                print(f"\n{benchmark_name.upper()} Results:")
+                print(f"  Base Pass@1: {metrics.get('base_pass@1', 0.0):.2%}")
+                print(f"  Plus Pass@1: {metrics.get('plus_pass@1', 0.0):.2%}")
+            
+            print(f"\n{'='*80}")
+            print(f"EvalPlus Benchmark Suite Complete")
+            print(f"{'='*80}\n")
+            
+            return all_results
+    
+    # Legacy benchmarks (fallback)
     # Initialize available benchmarks with fixed high token limits (no adaptive adjustment)
     available_benchmarks = {
         'humaneval': HumanEvalBenchmark(tokenizer, max_new_tokens=1024, timeout_seconds=10, use_test_execution=use_test_execution, use_adaptive_tokens=False),
@@ -860,13 +930,16 @@ def main(args):
         mbpp_dataset = secondary_dataset  # For backwards compatibility
     
     # Move model to GPU if available (needed for baseline evaluation)
-    model = move_model_to_device(model, verbose=True)
+    model = move_model_to_device(model, verbose=True, force_device=args.device)
+    training_device = get_device(args.device)
+    print(f"ℹ️  Training and benchmarking will use device: {training_device.upper()}")
     
     # Baseline: Evaluate base model (before LoRA training) on benchmarks
     # Only run if benchmark_strategy is not 'none'
     if args.benchmark_strategy != 'none':
         print("\n" + "="*80)
         print("BASELINE EVALUATION: Base Model (Before LoRA Training)")
+        print(f"Benchmarking device: {training_device.upper()}")
         print("="*80)
         
         # Run benchmark suite on base model
@@ -876,7 +949,10 @@ def main(args):
             benchmark_names=args.benchmarks,
             max_samples=None,  # Run on full benchmark datasets
             use_test_execution=True,
-            log_prefix="baseline"
+            log_prefix="baseline",
+            use_evalplus=args.use_evalplus,
+            evalplus_backend=args.evalplus_backend,
+            model_name=args.model_name
         )
         
         # Log results to wandb for each benchmark
@@ -1108,7 +1184,10 @@ def main(args):
             model=model,
             tokenizer=tokenizer,
             benchmark_names=args.benchmarks,
-            use_test_execution=True
+            use_test_execution=True,
+            use_evalplus=args.use_evalplus,
+            evalplus_backend=args.evalplus_backend,
+            model_name=args.model_name
         ))
         print(f"✓ Epoch benchmarking enabled - will run {args.benchmarks} after each epoch")
     
@@ -1149,6 +1228,7 @@ def main(args):
     if args.benchmark_strategy in ['final', 'epoch']:
         print("\n" + "="*80)
         print("FINAL EVALUATION: Trained Model (After LoRA Training)")
+        print(f"Benchmarking device: {training_device.upper()}")
         print("="*80)
         
         # Run benchmark suite on trained model
@@ -1158,7 +1238,10 @@ def main(args):
             benchmark_names=args.benchmarks,
             max_samples=None,  # Run on full benchmark datasets
             use_test_execution=True,
-            log_prefix="final"
+            log_prefix="final",
+            use_evalplus=args.use_evalplus,
+            evalplus_backend=args.evalplus_backend,
+            model_name=args.model_name
         )
         
         # Log results to wandb for each benchmark
@@ -1309,6 +1392,14 @@ def parse_args(argv=None):
                        help="Benchmarks to run for baseline and final evaluation: humaneval, humanevalplus, mbpp (default: humanevalplus)")
     parser.add_argument("--benchmark-strategy", type=str, default="final", choices=["none", "epoch", "final"],
                        help="Benchmarking strategy: 'none' (no benchmarks), 'epoch' (run after each epoch), 'final' (only baseline and final, default)")
+    parser.add_argument("--use_evalplus", action="store_true", default=True,
+                       help="Use EvalPlus framework for benchmarking (default: True, more accurate)")
+    parser.add_argument("--no_evalplus", action="store_false", dest="use_evalplus",
+                       help="Disable EvalPlus and use legacy benchmarks instead")
+    parser.add_argument("--evalplus_backend", type=str, default="hf", choices=["hf", "vllm", "openai", "anthropic", "google"],
+                       help="Backend for EvalPlus evaluation (default: hf)")
+    parser.add_argument("--device", type=str, default=None,
+                       help="Device to use for training and inference: 'cpu', 'cuda', 'cuda:0', 'mps', etc. (default: auto-detect)")
     parser.add_argument("--data_prep_only", action="store_true",
                        help="Only perform data preparation and report statistics (including truncation analysis), then exit without training.")
     return parser.parse_args(argv)

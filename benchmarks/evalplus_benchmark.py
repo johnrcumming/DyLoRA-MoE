@@ -132,7 +132,13 @@ class EvalPlusBenchmark(BaseBenchmark):
         try:
             # EvalPlus evaluate() writes results to a file and returns None
             # We need to read the results file after evaluation
-            result_path = samples_path.replace('.jsonl', '.eval_results.json')
+            # EvalPlus names the file: <samples_base>_eval_results.json
+            # samples_path is like: evalplus_results/humaneval/google--codegemma-2b_hf_temp_0.0.jsonl
+            # result_path should be: evalplus_results/humaneval/google--codegemma-2b_hf_temp_0.0_eval_results.json
+            if samples_path.endswith('.jsonl'):
+                result_path = samples_path[:-6] + '_eval_results.json'
+            else:
+                result_path = samples_path + '_eval_results.json'
             
             evaluate(
                 dataset=self.dataset,

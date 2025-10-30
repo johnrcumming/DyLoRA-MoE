@@ -87,7 +87,7 @@ def get_base_model_from_config(model_path: str) -> Optional[str]:
     return None
 
 
-def load_base_model(model_name: str, hf_token: Optional[str] = None):
+def load_base_model(model_name: str, hf_token: Optional[str] = None, force_device: Optional[str] = None):
     """Load base model for comparison."""
     print(f"\n--- Loading Base Model: {model_name} ---")
     
@@ -98,8 +98,7 @@ def load_base_model(model_name: str, hf_token: Optional[str] = None):
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             token=hf_token,
-            torch_dtype=_get_torch_dtype(),
-            device_map=get_device_map()
+            device_map=get_device_map(force_device)
         )
         
         print(f"✓ Base model loaded: {model_name}")
@@ -110,7 +109,7 @@ def load_base_model(model_name: str, hf_token: Optional[str] = None):
         return None, None
 
 
-def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] = None, fallback_base_model: Optional[str] = None):
+def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] = None, fallback_base_model: Optional[str] = None, force_device: Optional[str] = None):
     """Load trained DyLoRA-MoE model from local path.
     
     Args:
@@ -118,6 +117,7 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
         tokenizer: Optional existing tokenizer
         hf_token: HuggingFace token
         fallback_base_model: Base model to use if config doesn't specify one
+        force_device: Optional device override ('cpu', 'cuda', 'mps', etc.)
     """
     print(f"\n--- Loading Trained Model: {model_path} ---")
     
@@ -216,7 +216,7 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                             effective_base_model,
                             token=hf_token,
                             torch_dtype=_get_torch_dtype(),
-                            device_map=get_device_map(),
+                            device_map=get_device_map(force_device),
                             low_cpu_mem_usage=True
                         )
                         
@@ -289,7 +289,7 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                         model = AutoModelForCausalLM.from_pretrained(
                             model_path,
                             torch_dtype=_get_torch_dtype(),
-                            device_map=get_device_map(),
+                            device_map=get_device_map(force_device),
                             low_cpu_mem_usage=True,
                             trust_remote_code=True  # In case there are custom components
                         )
@@ -309,7 +309,7 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                                 effective_base_model,
                                 token=hf_token,
                                 torch_dtype=_get_torch_dtype(),
-                                device_map=get_device_map(),
+                                device_map=get_device_map(force_device),
                                 low_cpu_mem_usage=True
                             )
                             
@@ -349,7 +349,7 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
             model = AutoPeftModelForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype=_get_torch_dtype(),
-                device_map=get_device_map()
+                device_map=get_device_map(force_device)
             )
             
             # Get tokenizer if not provided
@@ -382,10 +382,10 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype=_get_torch_dtype(),
-                device_map=get_device_map(),
+                device_map=get_device_map(force_device),
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
-                offload_folder="./offload" if get_device_map() is None else None
+                offload_folder="./offload" if get_device_map(force_device) is None else None
             )
             
             print("✓ Loaded as regular AutoModelForCausalLM")
@@ -405,7 +405,7 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
         return None, None
 
 
-def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[str] = None, fallback_base_model: Optional[str] = None):
+def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[str] = None, fallback_base_model: Optional[str] = None, force_device: Optional[str] = None):
     """Load trained model from W&B artifact. Returns (model, tokenizer, base_model_name)
     
     Args:
@@ -413,6 +413,7 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
         tokenizer: Optional existing tokenizer
         hf_token: HuggingFace token
         fallback_base_model: Base model to use if config doesn't specify one
+        force_device: Optional device override ('cpu', 'cuda', 'mps', etc.)
     """
     print(f"\n--- Loading Model from W&B Artifact: {artifact_path} ---")
     
@@ -451,7 +452,7 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
             print(f"📄 Using base model: {effective_base_model} (from {'config' if config_base_model else 'argument'})")
         
         # Load the model using the same logic as local loading, but pass the effective base model
-        model, model_tokenizer = load_trained_model(model_path, tokenizer, hf_token, effective_base_model)
+        model, model_tokenizer = load_trained_model(model_path, tokenizer, hf_token, effective_base_model, force_device)
         
         return model, model_tokenizer, effective_base_model
         
@@ -725,6 +726,10 @@ def parse_args(argv=None):
     parser.add_argument("--bf16", action="store_true",
                        help="Force bfloat16 precision (default: auto-detect based on device)")
     
+    # Device argument
+    parser.add_argument("--device", type=str, default=None,
+                       help="Device to use for model inference: 'cpu', 'cuda', 'cuda:0', 'mps', etc. (default: auto-detect)")
+    
     return parser.parse_args(argv)
 
 
@@ -785,7 +790,7 @@ def main(args=None):
     
     # Load base model if specified
     if args.model_name:
-        base_model, tokenizer = load_base_model(args.model_name, hf_token)
+        base_model, tokenizer = load_base_model(args.model_name, hf_token, args.device)
         if base_model is None:
             print("❌ Cannot proceed without base model")
             sys.exit(1)
@@ -796,7 +801,7 @@ def main(args=None):
     
     # Load trained model if specified
     if args.trained_model:
-        trained_model, trained_tokenizer = load_trained_model(args.trained_model, tokenizer, hf_token)
+        trained_model, trained_tokenizer = load_trained_model(args.trained_model, tokenizer, hf_token, force_device=args.device)
         if trained_model is not None:
             models["trained"] = trained_model
             if tokenizer is None:
@@ -805,7 +810,7 @@ def main(args=None):
     # Load W&B artifact if specified
     if args.wandb_artifact:
         wandb_model, wandb_tokenizer, wandb_config_base_model = load_wandb_artifact(
-            args.wandb_artifact, tokenizer, hf_token, args.model_name
+            args.wandb_artifact, tokenizer, hf_token, args.model_name, args.device
         )
         if wandb_model is not None:
             models["wandb"] = wandb_model
@@ -815,7 +820,7 @@ def main(args=None):
             # If we found a config base model from wandb artifact and haven't loaded base model yet
             if wandb_config_base_model and "base" not in models:
                 print(f"ℹ️  Loading base model from W&B artifact config: {wandb_config_base_model}")
-                base_model, base_tokenizer = load_base_model(wandb_config_base_model, hf_token)
+                base_model, base_tokenizer = load_base_model(wandb_config_base_model, hf_token, args.device)
                 if base_model is not None:
                     models["base"] = base_model
                     if tokenizer is None:
