@@ -406,7 +406,7 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
 
 
 def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[str] = None, fallback_base_model: Optional[str] = None, force_device: Optional[str] = None):
-    """Load trained model from W&B artifact. Returns (model, tokenizer, base_model_name)
+    """Load trained model from W&B artifact. Returns (model, tokenizer, base_model_name, model_path)
     
     Args:
         artifact_path: W&B artifact path
@@ -454,13 +454,13 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
         # Load the model using the same logic as local loading, but pass the effective base model
         model, model_tokenizer = load_trained_model(model_path, tokenizer, hf_token, effective_base_model, force_device)
         
-        return model, model_tokenizer, effective_base_model
+        return model, model_tokenizer, effective_base_model, model_path
         
     except Exception as e:
         print(f"❌ Failed to load W&B artifact: {e}")
         import traceback
         traceback.print_exc()
-        return None, None, None
+        return None, None, None, None
     finally:
         # Ensure the download run is closed if it's still open
         if wandb_run is not None:
@@ -471,7 +471,8 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
                   max_samples: Optional[int] = None, log_to_wandb: bool = False,
                   use_async_tests: bool = False, max_concurrent_tests: Optional[int] = None,
                   use_evalplus: bool = False, evalplus_backend: str = "hf",
-                  model_name_for_evalplus: Optional[str] = None) -> Dict[str, Any]:
+                  model_name_for_evalplus: Optional[str] = None,
+                  model_path_for_evalplus: Optional[str] = None) -> Dict[str, Any]:
     """Run all specified benchmarks on all models.
     
     Args:
@@ -484,13 +485,14 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
         max_concurrent_tests: Max concurrent tests (ignored if use_evalplus=True)
         use_evalplus: Use native EvalPlus framework
         evalplus_backend: EvalPlus backend (hf, vllm, etc.)
-        model_name_for_evalplus: Model name/path for EvalPlus (required if use_evalplus=True)
+        model_name_for_evalplus: Model name/path for EvalPlus (for base models)
+        model_path_for_evalplus: Model path for EvalPlus (for trained models)
     """
     
     if use_evalplus:
         # Use native EvalPlus benchmarks
-        if not model_name_for_evalplus:
-            raise ValueError("model_name_for_evalplus is required when use_evalplus=True")
+        if not model_name_for_evalplus and not model_path_for_evalplus:
+            raise ValueError("Either model_name_for_evalplus or model_path_for_evalplus is required when use_evalplus=True")
         
         # Map benchmark names to EvalPlus datasets
         evalplus_dataset_map = {
@@ -518,6 +520,7 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
                 benchmark = EvalPlusBenchmark(
                     tokenizer=tokenizer,
                     model_name=model_name_for_evalplus,
+                    model_path=model_path_for_evalplus,
                     dataset=evalplus_dataset,
                     max_new_tokens=4096,
                     greedy=True,
@@ -687,8 +690,8 @@ def parse_args(argv=None):
     )
     
     # Model arguments
-    parser.add_argument("--model_name", type=str, default="google/codegemma-2b",
-                       help="Base model name (e.g., 'google/codegemma-2b'). Optional if using --wandb_artifact or --trained_model.")
+    parser.add_argument("--model_name", type=str, default=None,
+                       help="Base model name (e.g., 'google/codegemma-2b'). Only required for baseline comparison. Optional if using only --wandb_artifact or --trained_model.")
     parser.add_argument("--trained_model", type=str, default=None,
                        help="Path to trained model directory (e.g., './results_full/best_model')")
     parser.add_argument("--wandb_artifact", type=str, default=None,
@@ -771,31 +774,19 @@ def main(args=None):
     if args.wandb_key:
         os.environ["WANDB_API_KEY"] = args.wandb_key
     
-    # Try to determine base model from config files if not explicitly provided
-    config_base_model = None
-    if args.trained_model and os.path.exists(args.trained_model):
-        config_base_model = get_base_model_from_config(args.trained_model)
-    
-    # For W&B artifacts, we'll get the config after downloading
-    # So we handle that separately below
-    
-    # Use config base model if found and no explicit model_name argument was provided
-    # Check if model_name is the default value
-    if config_base_model and args.model_name == "google/codegemma-2b":
-        print(f"ℹ️  Using base model from trained model config: {config_base_model}")
-        args.model_name = config_base_model
-    
     # Prepare models dictionary
     models = {}
     
-    # Load base model if specified
+    # Load base model ONLY if explicitly specified by user
     if args.model_name:
+        print(f"\n📊 Loading base model for baseline comparison: {args.model_name}")
         base_model, tokenizer = load_base_model(args.model_name, hf_token, args.device)
         if base_model is None:
             print("❌ Cannot proceed without base model")
             sys.exit(1)
         models["base"] = base_model
     else:
+        print(f"\nℹ️  No --model_name specified, skipping baseline benchmark")
         # We'll get tokenizer from the first loaded model
         tokenizer = None
     
@@ -808,8 +799,10 @@ def main(args=None):
                 tokenizer = trained_tokenizer
     
     # Load W&B artifact if specified
+    wandb_config_base_model = None
+    wandb_model_path = None
     if args.wandb_artifact:
-        wandb_model, wandb_tokenizer, wandb_config_base_model = load_wandb_artifact(
+        wandb_model, wandb_tokenizer, wandb_config_base_model, wandb_model_path = load_wandb_artifact(
             args.wandb_artifact, tokenizer, hf_token, args.model_name, args.device
         )
         if wandb_model is not None:
@@ -817,18 +810,13 @@ def main(args=None):
             if tokenizer is None:
                 tokenizer = wandb_tokenizer
             
-            # If we found a config base model from wandb artifact and haven't loaded base model yet
-            if wandb_config_base_model and "base" not in models:
-                print(f"ℹ️  Loading base model from W&B artifact config: {wandb_config_base_model}")
-                base_model, base_tokenizer = load_base_model(wandb_config_base_model, hf_token, args.device)
-                if base_model is not None:
-                    models["base"] = base_model
-                    if tokenizer is None:
-                        tokenizer = base_tokenizer
+            # Note: We do NOT automatically load base model from config for baseline comparison
+            # User must explicitly specify --model_name for baseline comparison
+            if wandb_config_base_model and not args.model_name:
+                print(f"ℹ️  W&B artifact config contains base model: {wandb_config_base_model}")
+                print(f"   To run baseline comparison, add: --model_name {wandb_config_base_model}")
         else:
             print("⚠️  Warning: W&B artifact model failed to load, but will continue with other models")
-            # Even if wandb artifact failed, we might still have base model loaded
-            # So don't exit here, just log the warning
     
     # Validate that we have at least one model and tokenizer
     if len(models) == 0:
@@ -867,20 +855,25 @@ def main(args=None):
         
         # Determine model name for EvalPlus
         model_name_for_evalplus = None
+        model_path_for_evalplus = None
+        
         if args.use_evalplus:
             # Use the actual model path/name for EvalPlus
             if args.trained_model:
-                # For trained models, we need the base model name since EvalPlus loads from HF
-                # Try to get it from config, otherwise use args.model_name
-                model_name_for_evalplus = get_base_model_from_config(args.trained_model) or args.model_name
+                # For trained models, use the path directly
+                model_path_for_evalplus = args.trained_model
             elif args.wandb_artifact:
-                # Similar for W&B artifacts
-                model_name_for_evalplus = args.model_name
+                # Use the W&B artifact model path
+                model_path_for_evalplus = wandb_model_path
             else:
-                # For base model, use the model_name directly
+                # For base model, use the model_name
                 model_name_for_evalplus = args.model_name
             
-            print(f"EvalPlus will use model: {model_name_for_evalplus}")
+            print(f"EvalPlus will use:")
+            if model_path_for_evalplus:
+                print(f"  Model path: {model_path_for_evalplus}")
+            if model_name_for_evalplus:
+                print(f"  Model name: {model_name_for_evalplus}")
         
         results = run_benchmarks(
             models=models,
@@ -892,7 +885,8 @@ def main(args=None):
             max_concurrent_tests=args.max_concurrent_tests,
             use_evalplus=args.use_evalplus,
             evalplus_backend=args.evalplus_backend,
-            model_name_for_evalplus=model_name_for_evalplus
+            model_name_for_evalplus=model_name_for_evalplus,
+            model_path_for_evalplus=model_path_for_evalplus
         )
         
         # Compare results
