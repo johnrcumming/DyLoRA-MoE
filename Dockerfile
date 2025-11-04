@@ -18,7 +18,6 @@ RUN pip install -r /app/requirements.txt
 # Copy the current directory contents into the container at /app
 COPY dylo_moe/ /app/dylo_moe/
 COPY data/ /app/data/
-COPY peft/ /app/peft/
 COPY benchmarks/ /app/benchmarks/
 COPY train.py /app/
 COPY benchmark.py /app/

@@ -1,0 +1,84 @@
+# Git directories
+.git
+.gitignore
+.gitattributes
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Documentation
+docs/_build/
+site/
+
+# Wandb
+wandb/
+
+# Results and checkpoints (exclude from Docker context - too large)
+results/
+results_full/
+artifacts/
+checkpoint-*/
+
+# PEFT directory (already cloned in Dockerfile)
+peft/
+
+# EvalPlus (if you have it locally)
+evalplus/
+
+# Method comparison logs
+method_comparison/MetaMathQA/cancelled_results/
+method_comparison/MetaMathQA/temporary_results/
+
+# Markdown documentation files (not needed in container)
+*.md
+!README.md
+
+# Test files
+test_*.py
+*_test.py
+
+# Config files not needed in container
+.pylintrc
+.flake8
+mypy.ini
