@@ -352,6 +352,75 @@ class BenchmarkCallback(TrainerCallback):
         print(f"{'='*80}\n")
 
 
+class PeftCheckpointCallback(TrainerCallback):
+    """
+    Callback to save PEFT expert adapters separately at each checkpoint.
+    
+    This ensures checkpoints preserve the MoE structure with separate expert adapters
+    instead of saving merged weights that lose routing capability.
+    """
+    
+    def __init__(self, num_experts: int):
+        self.num_experts = num_experts
+        
+    def on_save(self, args, state, control, **kwargs):
+        """
+        Called when a checkpoint is saved.
+        Saves PEFT adapters and DyLoRA-MoE state alongside the standard checkpoint.
+        """
+        model = kwargs.get('model')
+        if model is None:
+            print("⚠️  Warning: Model not found in callback kwargs, skipping PEFT checkpoint")
+            return
+        
+        # Determine checkpoint directory
+        # The Trainer saves to: output_dir/checkpoint-{step}
+        checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        
+        if not os.path.exists(checkpoint_dir):
+            print(f"⚠️  Warning: Checkpoint directory not found: {checkpoint_dir}")
+            return
+        
+        print(f"\n💾 Saving PEFT adapters for checkpoint-{state.global_step}...")
+        
+        # Save PEFT expert adapters
+        peft_adapters_dir = os.path.join(checkpoint_dir, "peft_adapters")
+        try:
+            save_lora_experts(model, peft_adapters_dir)
+            print(f"   ✓ PEFT adapters saved to {peft_adapters_dir}")
+        except Exception as e:
+            print(f"   ✗ Failed to save PEFT adapters: {e}")
+        
+        # Save DyLoRA-MoE state (router + skill library)
+        dylo_moe_state_dir = os.path.join(checkpoint_dir, "dylo_moe_state")
+        try:
+            save_dylo_moe_state(model, dylo_moe_state_dir)
+            print(f"   ✓ DyLoRA-MoE state saved to {dylo_moe_state_dir}")
+        except Exception as e:
+            print(f"   ✗ Failed to save DyLoRA-MoE state: {e}")
+        
+        # Update config.json to mark as DyLoRA-MoE format
+        config_path = os.path.join(checkpoint_dir, "config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                
+                # Add DyLoRA-MoE markers
+                config["model_type"] = "dylora-moe"
+                config["_dylora_format"] = "peft_separated"
+                config["_dylora_checkpoint_step"] = state.global_step
+                
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+                
+                print(f"   ✓ Updated config.json with DyLoRA-MoE markers")
+            except Exception as e:
+                print(f"   ✗ Failed to update config.json: {e}")
+        
+        print(f"✓ PEFT checkpoint complete for step {state.global_step}\n")
+
+
 def analyze_truncation_stats(texts, tokenizer, max_length=768, dataset_name="Dataset"):
     """
     Analyze and report truncation statistics for a dataset.
@@ -1176,7 +1245,10 @@ def main(args):
     callbacks = [
         GradientMonitoringCallback(model, num_experts=model.expert_manager.num_experts),
         DyLoRAMonitoringCallback(model, num_experts=model.expert_manager.num_experts),
+        PeftCheckpointCallback(num_experts=model.expert_manager.num_experts),  # Save PEFT adapters at each checkpoint
     ]
+    
+    print(f"✓ PEFT checkpoint saving enabled - will save separate expert adapters at each checkpoint")
     
     # Add benchmark callback if strategy is 'epoch'
     if args.benchmark_strategy == 'epoch':
@@ -1282,31 +1354,38 @@ def main(args):
     print("\n✓ Final evaluation complete")
     print("="*80 + "\n")
 
-    # 9. Save the best model
-    print("\n--- Saving Best Model ---")
-    trainer.save_model("./results_full/best_model")
-    tokenizer.save_pretrained("./results_full/best_model")
-    print("Best model saved to ./results_full/best_model")
-
     # 9. Save the best model, trainer state, and DyLoRA-MoE state
-    print("--- Saving Best Model and Full State ---")
+    print("\n--- Saving Best Model and Full State ---")
     best_model_dir = "./results_full/best_model"
     
-    # Save model, tokenizer, and training arguments
-    trainer.save_model(best_model_dir)
-    trainer.save_state()  # Saves optimizer, scheduler, etc. to output_dir
+    # CRITICAL: Save PEFT adapters separately (NOT merged) to preserve MoE capability
+    # This saves each expert's LoRA adapters as separate files (expert_0.pt, expert_1.pt, etc.)
+    # Without this, the model collapses to a single merged model with no MoE routing
+    print("\n1. Saving PEFT expert adapters (separate files for each expert)...")
+    peft_adapters_dir = os.path.join(best_model_dir, "peft_adapters")
+    save_lora_experts(model, peft_adapters_dir)
+    print(f"✓ PEFT adapters saved to {peft_adapters_dir}")
+    
+    # Save DyLoRA-MoE specific state (router and skill library)
+    print("\n2. Saving DyLoRA-MoE state (router + skill library)...")
+    dylo_moe_state_dir = os.path.join(best_model_dir, "dylo_moe_state")
+    save_dylo_moe_state(model, dylo_moe_state_dir)
+    print(f"✓ DyLoRA-MoE state saved to {dylo_moe_state_dir}")
+    
+    # Save tokenizer and training arguments
+    print("\n3. Saving tokenizer and training config...")
     tokenizer.save_pretrained(best_model_dir)
+    trainer.save_state()  # Saves optimizer, scheduler, etc. to output_dir
     torch.save(training_args, os.path.join(training_args.output_dir, "training_args.bin"))
+    print(f"✓ Tokenizer and training args saved")
     
-    # Save config.json with proper base model architecture + DyLoRA metadata
-    # This ensures the model can be loaded by AutoModelForCausalLM in benchmark.py
-    print("Creating loadable config.json with base model architecture...")
-    
-    # Get the base model's config (the actual architecture)
+    # Save config.json with DyLoRA-MoE metadata for model loading
+    print("\n4. Creating config.json with DyLoRA-MoE metadata...")
     base_config = AutoConfig.from_pretrained(args.model_name)
     base_config_dict = base_config.to_dict()
     
-    # Add DyLoRA-specific metadata as extra fields (won't interfere with loading)
+    # Add DyLoRA-specific metadata to enable proper loading
+    base_config_dict["model_type"] = "dylora-moe"  # Mark as DyLoRA-MoE format
     base_config_dict["base_model_name_or_path"] = args.model_name
     base_config_dict["_dylora_num_experts"] = args.num_experts
     base_config_dict["_dylora_lora_r"] = args.lora_r
@@ -1314,19 +1393,31 @@ def main(args):
     base_config_dict["_dylora_lora_dropout"] = args.lora_dropout
     base_config_dict["_dylora_trained"] = True
     base_config_dict["_dylora_saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    base_config_dict["_dylora_format"] = "peft_separated"  # Indicates separate PEFT files
     
-    # Save the merged config
     config_path = os.path.join(best_model_dir, "config.json")
     with open(config_path, 'w') as f:
         json.dump(base_config_dict, f, indent=2)
-    print(f"✓ Configuration saved to {config_path} (model_type: {base_config_dict.get('model_type')})")
+    print(f"✓ Configuration saved to {config_path} (format: dylora-moe with separated PEFT adapters)")
     
-    print(f"Best model, tokenizer, and training args saved to {best_model_dir} and {training_args.output_dir}")
-
-    # Save DyLoRA-MoE specific state
-    dylo_moe_state_dir = os.path.join(training_args.output_dir, "dylo_moe_state")
-    save_dylo_moe_state(model, dylo_moe_state_dir)
-    print(f"DyLoRA-MoE state saved to {dylo_moe_state_dir}")
+    print(f"\n{'='*80}")
+    print("CHECKPOINT STRUCTURE:")
+    print(f"{'='*80}")
+    print(f"📁 {best_model_dir}/")
+    print(f"   ├── config.json                    (DyLoRA-MoE metadata)")
+    print(f"   ├── tokenizer files                (tokenizer.json, etc.)")
+    print(f"   ├── 📁 peft_adapters/")
+    print(f"   │   ├── expert_0.pt                (Expert 0 LoRA weights)")
+    print(f"   │   ├── expert_1.pt                (Expert 1 LoRA weights)")
+    print(f"   │   ├── expert_2.pt                (Expert 2 LoRA weights)")
+    print(f"   │   └── expert_3.pt                (Expert 3 LoRA weights)")
+    print(f"   └── 📁 dylo_moe_state/")
+    print(f"       ├── router.pt                  (Router state)")
+    print(f"       └── skill_library.pt           (Skill library state)")
+    print(f"{'='*80}")
+    print(f"\n✓ Model saved in PEFT-separated format (MoE routing preserved)")
+    print(f"✓ Base model ({args.model_name}) will be loaded separately during inference")
+    print(f"{'='*80}\n")
 
     # 10. Upload the entire output directory as a wandb artifact
     print("--- Uploading Artifacts to W&B ---")
