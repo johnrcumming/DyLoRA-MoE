@@ -960,4 +960,9 @@ def main(args=None):
 
 
 if __name__ == "__main__":
+    # Protect imports for Windows multiprocessing
+    # This prevents re-import issues when EvalPlus spawns worker processes
+    import multiprocessing
+    multiprocessing.freeze_support()
+    
     main()
