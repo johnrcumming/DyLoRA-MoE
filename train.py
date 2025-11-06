@@ -986,8 +986,9 @@ def main(args):
     if not loaded_datasets:
         raise ValueError("No datasets were successfully loaded. Please check --datasets argument.")
     
+    if args.benchmark_strategy != 'none':
     # Download HumanEval for evaluation only (not used in training)
-    humaneval_dataset = download_humaneval()
+        humaneval_dataset = download_humaneval()
     
     # For backwards compatibility, assign first two datasets as primary datasets
     # (used in interleaved sampling if enabled)
@@ -998,17 +999,22 @@ def main(args):
         secondary_dataset_name, secondary_dataset = loaded_datasets[1]
         mbpp_dataset = secondary_dataset  # For backwards compatibility
     
+    # Display device information before training
+    print_device_info(force_device=args.device)
+    training_device = get_device(args.device)
+    if args.device:
+        print(f"✓ Using user-specified device: {training_device.upper()}\n")
+    else:
+        print(f"✓ Auto-detected optimal device: {training_device.upper()}\n")
+    
     # Move model to GPU if available (needed for baseline evaluation)
     model = move_model_to_device(model, verbose=True, force_device=args.device)
-    training_device = get_device(args.device)
-    print(f"ℹ️  Training and benchmarking will use device: {training_device.upper()}")
     
     # Baseline: Evaluate base model (before LoRA training) on benchmarks
     # Only run if benchmark_strategy is not 'none'
     if args.benchmark_strategy != 'none':
         print("\n" + "="*80)
         print("BASELINE EVALUATION: Base Model (Before LoRA Training)")
-        print(f"Benchmarking device: {training_device.upper()}")
         print("="*80)
         
         # Run benchmark suite on base model
@@ -1124,7 +1130,8 @@ def main(args):
     print(f"\nCombined dataset split:")
     print(f"  Training: {len(train_data)} examples ({len(train_data)/len(combined_data)*100:.1f}%)")
     print(f"  Validation: {len(val_data)} examples ({len(val_data)/len(combined_data)*100:.1f}%)")
-    print(f"  HumanEval (benchmark only): {len(humaneval_dataset)} examples")
+    if args.benchmark_strategy != 'none':
+        print(f"  HumanEval (benchmark only): {len(humaneval_dataset)} examples")
 
 
 
@@ -1227,17 +1234,18 @@ def main(args):
         return  # Exit main() function
     
     # Prepare HumanEval for benchmarking only (not for per-epoch evaluation)
-    print(f"\n--- Preparing HumanEval Benchmark Dataset ---")
-    humaneval_eval_data = []
-    for ex in humaneval_dataset:
-        prompt = ex.get('prompt', '')
-        if prompt:
-            humaneval_eval_data.append(prompt)
-    
-    humaneval_eval_dataset = Dataset.from_dict({"text": humaneval_eval_data})
-    humaneval_benchmark = preprocess_evaluation_dataset(tokenizer, humaneval_eval_dataset)
-    
-    print(f"HumanEval benchmark: {len(humaneval_benchmark)} examples")
+    if args.benchmark_strategy != 'none':
+        print(f"\n--- Preparing HumanEval Benchmark Dataset ---")
+        humaneval_eval_data = []
+        for ex in humaneval_dataset:
+            prompt = ex.get('prompt', '')
+            if prompt:
+                humaneval_eval_data.append(prompt)
+        
+        humaneval_eval_dataset = Dataset.from_dict({"text": humaneval_eval_data})
+        humaneval_benchmark = preprocess_evaluation_dataset(tokenizer, humaneval_eval_dataset)
+        
+        print(f"HumanEval benchmark: {len(humaneval_benchmark)} examples")
 
     
     # Create callbacks with updated early stopping parameters
@@ -1300,7 +1308,6 @@ def main(args):
     if args.benchmark_strategy in ['final', 'epoch']:
         print("\n" + "="*80)
         print("FINAL EVALUATION: Trained Model (After LoRA Training)")
-        print(f"Benchmarking device: {training_device.upper()}")
         print("="*80)
         
         # Run benchmark suite on trained model
@@ -1334,7 +1341,7 @@ def main(args):
         print("\nℹ Skipping final evaluation (benchmark_strategy='none')\n")
     
     # Also evaluate loss on the first benchmark dataset for compatibility
-    if args.benchmarks and len(args.benchmarks) > 0:
+    if args.benchmark_strategy != 'none' and args.benchmarks and len(args.benchmarks) > 0:
         first_benchmark = args.benchmarks[0]
         # Map benchmark names to dataset variables
         benchmark_dataset_map = {
@@ -1351,8 +1358,8 @@ def main(args):
                 f"final/{first_benchmark}_loss": final_eval['eval_loss'],
             }, commit=False)
     
-    print("\n✓ Final evaluation complete")
-    print("="*80 + "\n")
+        print("\n✓ Final evaluation complete")
+        print("="*80 + "\n")
 
     # 9. Save the best model, trainer state, and DyLoRA-MoE state
     print("\n--- Saving Best Model and Full State ---")
