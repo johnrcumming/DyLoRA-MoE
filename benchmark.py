@@ -471,7 +471,10 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
                   max_samples: Optional[int] = None, log_to_wandb: bool = False,
                   use_async_tests: bool = False, max_concurrent_tests: Optional[int] = None,
                   use_evalplus: bool = False, evalplus_backend: str = "hf",
-                  model_name_for_evalplus: Optional[str] = None) -> Dict[str, Any]:
+                  model_name_for_evalplus: Optional[str] = None,
+                  peft_moe_artifact: Optional[str] = None,
+                  peft_moe_base_model: Optional[str] = None,
+                  peft_moe_routing: str = "router") -> Dict[str, Any]:
     """Run all specified benchmarks on all models.
     
     Args:
@@ -704,7 +707,16 @@ def parse_args(argv=None):
     parser.add_argument("--no_evalplus", action="store_false", dest="use_evalplus",
                        help="Disable EvalPlus and use legacy custom benchmarks")
     parser.add_argument("--evalplus_backend", type=str, default="hf",
-                       help="EvalPlus backend: hf (HuggingFace), vllm, etc. (default: hf)")
+                       help="EvalPlus backend: hf (HuggingFace), vllm, peft_moe, etc. (default: hf)")
+    
+    # PEFT MoE arguments
+    parser.add_argument("--peft_moe_artifact", type=str, default=None,
+                       help="W&B artifact path for PEFT MoE model (e.g., 'user/project/artifact:v0'). Enables peft_moe backend automatically.")
+    parser.add_argument("--peft_moe_base_model", type=str, default=None,
+                       help="Base model for PEFT MoE (e.g., 'google/codegemma-2b'). Auto-detected from checkpoint if not provided.")
+    parser.add_argument("--peft_moe_routing", type=str, default="router",
+                       help="Routing strategy for PEFT MoE: router, single:N, ensemble, best, round_robin (default: router)")
+    
     parser.add_argument("--use_async_tests", action="store_true", default=True,
                        help="Enable async test execution for improved GPU utilization (default: enabled for legacy benchmarks with --no_evalplus)")
     parser.add_argument("--no_async_tests", action="store_false", dest="use_async_tests",
@@ -756,11 +768,22 @@ def main(args=None):
     # Print device info at startup (with dtype override applied)
     print_device_info(dtype_override)
     
+    # Handle peft_moe backend configuration
+    if args.peft_moe_artifact:
+        # Automatically enable peft_moe backend when artifact is specified
+        args.evalplus_backend = "peft_moe"
+        args.use_evalplus = True
+        print(f"ℹ️  Auto-enabling peft_moe backend for artifact: {args.peft_moe_artifact}")
+        print(f"ℹ️  Routing strategy: {args.peft_moe_routing}")
+        # For peft_moe, we don't load base model separately - the decoder handles it
+        # Skip base model loading
+        args.model_name = None
+    
     # Validate arguments
-    if not args.wandb_artifact and not args.trained_model:
+    if not args.wandb_artifact and not args.trained_model and not args.peft_moe_artifact:
         print(f"ℹ️  Using default base model: {args.model_name}")
         if not args.model_name:
-            print("❌ Error: Must specify at least one of --model_name, --wandb_artifact, or --trained_model")
+            print("❌ Error: Must specify at least one of --model_name, --wandb_artifact, --trained_model, or --peft_moe_artifact")
             sys.exit(1)
     
     # Set logging preference (default: log to wandb unless --no_wandb specified)
@@ -831,15 +854,23 @@ def main(args=None):
             # So don't exit here, just log the warning
     
     # Validate that we have at least one model and tokenizer
-    if len(models) == 0:
+    # Exception: peft_moe backend doesn't need pre-loaded models
+    if len(models) == 0 and not args.peft_moe_artifact:
         print("❌ No models loaded successfully")
         sys.exit(1)
     
-    if tokenizer is None:
+    if tokenizer is None and not args.peft_moe_artifact:
         print("❌ No tokenizer available")
         sys.exit(1)
     
-    print(f"\n✅ Successfully loaded {len(models)} model(s): {list(models.keys())}")
+    if args.peft_moe_artifact:
+        # For peft_moe, create a dummy models dict for the benchmark loop
+        # The actual model will be loaded by EvalPlus
+        models = {"peft_moe": None}
+        tokenizer = None  # EvalPlus will load tokenizer
+        print(f"\n✅ PEFT MoE backend enabled: {args.peft_moe_artifact}")
+    else:
+        print(f"\n✅ Successfully loaded {len(models)} model(s): {list(models.keys())}")
     
     # Initialize W&B if logging requested (default: True, unless --no_wandb)
     if log_to_wandb:
@@ -869,7 +900,10 @@ def main(args=None):
         model_name_for_evalplus = None
         if args.use_evalplus:
             # Use the actual model path/name for EvalPlus
-            if args.trained_model:
+            if args.peft_moe_artifact:
+                # For peft_moe, use placeholder - decoder will handle model loading
+                model_name_for_evalplus = "peft_moe_model"
+            elif args.trained_model:
                 # For trained models, we need the base model name since EvalPlus loads from HF
                 # Try to get it from config, otherwise use args.model_name
                 model_name_for_evalplus = get_base_model_from_config(args.trained_model) or args.model_name
@@ -880,7 +914,8 @@ def main(args=None):
                 # For base model, use the model_name directly
                 model_name_for_evalplus = args.model_name
             
-            print(f"EvalPlus will use model: {model_name_for_evalplus}")
+            if not args.peft_moe_artifact:
+                print(f"EvalPlus will use model: {model_name_for_evalplus}")
         
         results = run_benchmarks(
             models=models,
@@ -892,7 +927,10 @@ def main(args=None):
             max_concurrent_tests=args.max_concurrent_tests,
             use_evalplus=args.use_evalplus,
             evalplus_backend=args.evalplus_backend,
-            model_name_for_evalplus=model_name_for_evalplus
+            model_name_for_evalplus=model_name_for_evalplus,
+            peft_moe_artifact=args.peft_moe_artifact,
+            peft_moe_base_model=args.peft_moe_base_model,
+            peft_moe_routing=args.peft_moe_routing
         )
         
         # Compare results
