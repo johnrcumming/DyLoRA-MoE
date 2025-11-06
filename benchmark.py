@@ -505,7 +505,8 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
         all_results = {}
         
         for model_name, model in models.items():
-            if model is None:
+            # For peft_moe backend, model is None since EvalPlus loads it directly
+            if model is None and evalplus_backend != "peft_moe":
                 print(f"⚠️  Skipping {model_name} (failed to load)")
                 continue
             
@@ -517,6 +518,16 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
                 
                 evalplus_dataset = evalplus_dataset_map[benchmark_name]
                 
+                # Construct backend-specific kwargs for peft_moe
+                backend_kwargs = {}
+                if evalplus_backend == "peft_moe":
+                    if peft_moe_artifact:
+                        backend_kwargs["wandb_artifact"] = peft_moe_artifact
+                    if peft_moe_base_model:
+                        backend_kwargs["base_model"] = peft_moe_base_model
+                    if peft_moe_routing:
+                        backend_kwargs["routing_strategy"] = peft_moe_routing
+                
                 # Create EvalPlus benchmark instance
                 benchmark = EvalPlusBenchmark(
                     tokenizer=tokenizer,
@@ -526,7 +537,8 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
                     greedy=True,
                     backend=evalplus_backend,
                     force_base_prompt=False,
-                    mini=False
+                    mini=False,
+                    backend_kwargs=backend_kwargs
                 )
                 
                 # Run benchmark (model is passed but not directly used by EvalPlus)

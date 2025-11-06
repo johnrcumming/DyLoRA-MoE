@@ -15,7 +15,8 @@ class EvalPlusBenchmark(BaseBenchmark):
     def __init__(self, tokenizer, model_name: str, dataset: str = "humaneval", 
                  max_new_tokens: int = 4096, greedy: bool = True,
                  backend: str = "hf", root: str = "evalplus_results",
-                 force_base_prompt: bool = False, mini: bool = False):
+                 force_base_prompt: bool = False, mini: bool = False,
+                 backend_kwargs: Optional[Dict[str, Any]] = None):
         """Initialize EvalPlus benchmark.
         
         Args:
@@ -24,10 +25,11 @@ class EvalPlusBenchmark(BaseBenchmark):
             dataset: 'humaneval' or 'mbpp'
             max_new_tokens: Max tokens to generate
             greedy: Use greedy decoding (temperature=0)
-            backend: EvalPlus backend ('hf', 'vllm', etc.)
+            backend: EvalPlus backend ('hf', 'vllm', 'peft_moe', etc.)
             root: Root directory for results
             force_base_prompt: Force base model prompts (not chat)
             mini: Use mini version of dataset (faster)
+            backend_kwargs: Backend-specific parameters (e.g., wandb_artifact, routing_strategy for peft_moe)
         """
         super().__init__(f"EvalPlus-{dataset}", tokenizer, max_new_tokens, 
                         use_adaptive_tokens=False, use_async_tests=False)
@@ -38,6 +40,7 @@ class EvalPlusBenchmark(BaseBenchmark):
         self.root = root
         self.force_base_prompt = force_base_prompt
         self.mini = mini
+        self.backend_kwargs = backend_kwargs or {}
         self.samples_path = None
         
     def get_stop_sequences(self) -> List[str]:
@@ -95,21 +98,27 @@ class EvalPlusBenchmark(BaseBenchmark):
                 print(f"   Limiting to first {max_samples} samples")
         
         try:
-            samples_path = run_codegen(
-                model=self.model_name,
-                dataset=self.dataset,
-                root=self.root,
-                bs=1,  # Batch size
-                n_samples=1,  # Number of samples per task (greedy=1)
-                temperature=0.0 if self.greedy else 0.8,
-                resume=True,  # Resume if samples exist
-                greedy=self.greedy,
-                id_range=id_range,
-                backend=self.backend,
-                force_base_prompt=self.force_base_prompt,
-                dtype="bfloat16",
-                trust_remote_code=False,
-            )
+            # Construct codegen arguments
+            codegen_args = {
+                "model": self.model_name,
+                "dataset": self.dataset,
+                "root": self.root,
+                "bs": 1,  # Batch size
+                "n_samples": 1,  # Number of samples per task (greedy=1)
+                "temperature": 0.0 if self.greedy else 0.8,
+                "resume": True,  # Resume if samples exist
+                "greedy": self.greedy,
+                "id_range": id_range,
+                "backend": self.backend,
+                "force_base_prompt": self.force_base_prompt,
+                "dtype": "bfloat16",
+                "trust_remote_code": False,
+            }
+            
+            # Merge backend-specific kwargs (e.g., wandb_artifact, routing_strategy for peft_moe)
+            codegen_args.update(self.backend_kwargs)
+            
+            samples_path = run_codegen(**codegen_args)
             
             print(f"✓ Code generation complete: {samples_path}")
             self.samples_path = samples_path
