@@ -5,6 +5,7 @@ Tests loading model with separated expert adapters and verifies MoE routing work
 
 import sys
 import os
+import torch
 
 workspace_root = r"w:\UnderTheRadar\DyLoRA-MoE"
 sys.path.insert(0, workspace_root)
@@ -132,6 +133,13 @@ for strategy in strategies_to_test:
             print(f"  ✓ Output diversity: {unique_ratio:.2%}")
         else:
             print(f"  ⚠️  Low diversity: {unique_ratio:.2%} (may be repetitive)")
+    
+    # Clear GPU memory before next test
+    import gc
+    del decoder_test
+    torch.cuda.empty_cache()
+    gc.collect()
+    print("  ✓ GPU memory cleared")
 
 # Test 5: HumanEval-style prompt
 print("\n[TEST 5] Testing with HumanEval-style prompt...")
