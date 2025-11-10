@@ -5,7 +5,6 @@ Uses the official EvalPlus framework for both code generation and evaluation.
 import os
 import json
 import tempfile
-import shutil
 from typing import Dict, Any, List, Optional
 from .base_benchmark import BaseBenchmark
 
@@ -13,36 +12,36 @@ from .base_benchmark import BaseBenchmark
 class EvalPlusBenchmark(BaseBenchmark):
     """Benchmark using native EvalPlus framework for generation and evaluation."""
     
-    def __init__(self, tokenizer, model_name: Optional[str] = None, model_path: Optional[str] = None,
-                 dataset: str = "humaneval", max_new_tokens: int = 4096, greedy: bool = True,
+    def __init__(self, tokenizer, model_name: str, dataset: str = "humaneval", 
+                 max_new_tokens: int = 4096, greedy: bool = True,
                  backend: str = "hf", root: str = "evalplus_results",
-                 force_base_prompt: bool = False, mini: bool = False):
+                 force_base_prompt: bool = False, mini: bool = False,
+                 backend_kwargs: Optional[Dict[str, Any]] = None):
         """Initialize EvalPlus benchmark.
         
         Args:
             tokenizer: HuggingFace tokenizer
-            model_name: Model name for HuggingFace (for base models)
-            model_path: Path to pre-loaded model directory (for trained models)
+            model_name: Model name/path for HuggingFace
             dataset: 'humaneval' or 'mbpp'
             max_new_tokens: Max tokens to generate
             greedy: Use greedy decoding (temperature=0)
-            backend: EvalPlus backend ('hf', 'vllm', etc.)
+            backend: EvalPlus backend ('hf', 'vllm', 'peft_moe', etc.)
             root: Root directory for results
             force_base_prompt: Force base model prompts (not chat)
             mini: Use mini version of dataset (faster)
+            backend_kwargs: Backend-specific parameters (e.g., wandb_artifact, routing_strategy for peft_moe)
         """
         super().__init__(f"EvalPlus-{dataset}", tokenizer, max_new_tokens, 
                         use_adaptive_tokens=False, use_async_tests=False)
         self.model_name = model_name
-        self.model_path = model_path
         self.dataset = dataset
         self.greedy = greedy
         self.backend = backend
         self.root = root
         self.force_base_prompt = force_base_prompt
         self.mini = mini
+        self.backend_kwargs = backend_kwargs or {}
         self.samples_path = None
-        self.temp_model_dir = None
         
     def get_stop_sequences(self) -> List[str]:
         """EvalPlus handles stop sequences internally."""
@@ -72,9 +71,6 @@ class EvalPlusBenchmark(BaseBenchmark):
         
         This bypasses the parent class's per-sample evaluation and uses
         EvalPlus's native batch generation + evaluation pipeline.
-        
-        For pre-loaded models (like W&B artifacts), we save them to a temp directory
-        and pass that path to EvalPlus.
         """
         from evalplus.codegen import run_codegen
         from evalplus.evaluate import evaluate
@@ -82,83 +78,7 @@ class EvalPlusBenchmark(BaseBenchmark):
         print(f"\n{'='*80}")
         print(f"Running {self.name} Benchmark with EvalPlus Framework")
         print(f"{'='*80}\n")
-        
-        # Determine the model path for EvalPlus
-        evalplus_model_path = None
-        
-        if self.model_path:
-            # Pre-loaded DyLoRA-MoE model - ALWAYS merge PEFT/LoRA adapters
-            print(f"  Detected pre-loaded model from: {self.model_path}")
-            print(f"  ⚠️  Merging LoRA adapters for evaluation (DyLoRA-MoE always uses PEFT)...")
-            
-            try:
-                from peft import PeftModel
-                
-                # Create temp directory for merged model
-                self.temp_model_dir = tempfile.mkdtemp(prefix="evalplus_merged_model_")
-                
-                # Check if model has merge_and_unload method (PEFT model)
-                if hasattr(model, 'merge_and_unload'):
-                    print(f"  🔍 Model type: {type(model).__name__} (has merge_and_unload)")
-                    merged_model = model.merge_and_unload()
-                elif isinstance(model, PeftModel):
-                    print(f"  🔍 Model type: PeftModel (using merge_and_unload)")
-                    merged_model = model.merge_and_unload()
-                else:
-                    # Fallback: model might already be merged or is base model
-                    print(f"  ⚠️  Model type: {type(model).__name__} (no merge_and_unload, using as-is)")
-                    merged_model = model
-                
-                # Save merged model
-                merged_model.save_pretrained(self.temp_model_dir)
-                self.tokenizer.save_pretrained(self.temp_model_dir)
-                
-                evalplus_model_path = self.temp_model_dir
-                print(f"  ✓ Model saved to: {self.temp_model_dir}")
-                
-            except Exception as e:
-                print(f"  ❌ Failed to merge/save model: {e}")
-                import traceback
-                traceback.print_exc()
-                print(f"  ⚠️  Falling back to original path (may not include LoRA weights): {self.model_path}")
-                evalplus_model_path = self.model_path
-        elif self.model_name:
-            # Base model - EvalPlus will load it
-            evalplus_model_path = self.model_name
-            print(f"  Model: {self.model_name}")
-        else:
-            # Need to save the model temporarily
-            print(f"  Saving pre-loaded model to temporary directory...")
-            
-            # Check if this is a PEFT model
-            try:
-                from peft import PeftModel
-                is_peft = isinstance(model, PeftModel)
-            except:
-                is_peft = False
-            
-            try:
-                self.temp_model_dir = tempfile.mkdtemp(prefix="evalplus_model_")
-                
-                if is_peft:
-                    print(f"  ⚠️  PEFT model detected - merging LoRA adapters...")
-                    merged_model = model.merge_and_unload()
-                    merged_model.save_pretrained(self.temp_model_dir)
-                else:
-                    model.save_pretrained(self.temp_model_dir)
-                
-                self.tokenizer.save_pretrained(self.temp_model_dir)
-                evalplus_model_path = self.temp_model_dir
-                print(f"  ✓ Model saved to: {self.temp_model_dir}")
-            except Exception as e:
-                print(f"  ❌ Failed to save model: {e}")
-                # Fall back to model name if available
-                if hasattr(model, 'name_or_path'):
-                    evalplus_model_path = model.name_or_path
-                    print(f"  ⚠️  Falling back to model name: {evalplus_model_path}")
-                else:
-                    raise ValueError("Cannot determine model path for EvalPlus")
-        
+        print(f"  Model: {self.model_name}")
         print(f"  Dataset: {self.dataset}")
         print(f"  Backend: {self.backend}")
         print(f"  Greedy: {self.greedy}")
@@ -178,21 +98,27 @@ class EvalPlusBenchmark(BaseBenchmark):
                 print(f"   Limiting to first {max_samples} samples")
         
         try:
-            samples_path = run_codegen(
-                model=evalplus_model_path,
-                dataset=self.dataset,
-                root=self.root,
-                bs=1,  # Batch size
-                n_samples=1,  # Number of samples per task (greedy=1)
-                temperature=0.0 if self.greedy else 0.8,
-                resume=True,  # Resume if samples exist
-                greedy=self.greedy,
-                id_range=id_range,
-                backend=self.backend,
-                force_base_prompt=self.force_base_prompt,
-                dtype="bfloat16",
-                trust_remote_code=False,
-            )
+            # Construct codegen arguments
+            codegen_args = {
+                "model": self.model_name,
+                "dataset": self.dataset,
+                "root": self.root,
+                "bs": 1,  # Batch size
+                "n_samples": 1,  # Number of samples per task (greedy=1)
+                "temperature": 0.0 if self.greedy else 0.8,
+                "resume": True,  # Resume if samples exist
+                "greedy": self.greedy,
+                "id_range": id_range,
+                "backend": self.backend,
+                "force_base_prompt": self.force_base_prompt,
+                "dtype": "bfloat16",
+                "trust_remote_code": False,
+            }
+            
+            # Merge backend-specific kwargs (e.g., wandb_artifact, routing_strategy for peft_moe)
+            codegen_args.update(self.backend_kwargs)
+            
+            samples_path = run_codegen(**codegen_args)
             
             print(f"✓ Code generation complete: {samples_path}")
             self.samples_path = samples_path
@@ -336,12 +262,3 @@ class EvalPlusBenchmark(BaseBenchmark):
     def compute_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Not used - EvalPlus handles metrics computation."""
         raise NotImplementedError("EvalPlus computes metrics internally")
-    
-    def __del__(self):
-        """Cleanup temporary model directory if it was created."""
-        if self.temp_model_dir and os.path.exists(self.temp_model_dir):
-            try:
-                shutil.rmtree(self.temp_model_dir)
-                print(f"🗑️  Cleaned up temporary model directory: {self.temp_model_dir}")
-            except Exception as e:
-                print(f"⚠️  Failed to cleanup temp directory: {e}")

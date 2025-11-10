@@ -9,8 +9,11 @@ COPY requirements.txt /app/
 
 # Install git to clone PEFT
 RUN apt-get update && apt-get install -y git
+
 RUN git clone --branch MoE-PEFT https://github.com/johnrcumming/peft.git
 RUN pip install ./peft
+RUN git clone --branch MoE-PEFT https://github.com/johnrcumming/evalplus.git
+RUN pip install ./evalplus
 
 # Install any needed packages specified in requirements.txt
 RUN pip install -r /app/requirements.txt
@@ -18,7 +21,6 @@ RUN pip install -r /app/requirements.txt
 # Copy the current directory contents into the container at /app
 COPY dylo_moe/ /app/dylo_moe/
 COPY data/ /app/data/
-COPY peft/ /app/peft/
 COPY benchmarks/ /app/benchmarks/
 COPY train.py /app/
 COPY benchmark.py /app/

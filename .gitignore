@@ -10,6 +10,7 @@ results/
 logs/
 results_poc/
 artifacts/
+evalplus_results/
 
 # Weights & Biases
 wandb/

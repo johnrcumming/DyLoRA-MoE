@@ -1,3 +1,6 @@
 [submodule "peft"]
 	path = peft
 	url = https://github.com/johnrcumming/peft.git
+[submodule "evalplus"]
+	path = evalplus
+	url = https://github.com/johnrcumming/evalplus.git

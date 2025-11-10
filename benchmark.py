@@ -406,7 +406,7 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
 
 
 def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[str] = None, fallback_base_model: Optional[str] = None, force_device: Optional[str] = None):
-    """Load trained model from W&B artifact. Returns (model, tokenizer, base_model_name, model_path)
+    """Load trained model from W&B artifact. Returns (model, tokenizer, base_model_name)
     
     Args:
         artifact_path: W&B artifact path
@@ -454,13 +454,13 @@ def load_wandb_artifact(artifact_path: str, tokenizer=None, hf_token: Optional[s
         # Load the model using the same logic as local loading, but pass the effective base model
         model, model_tokenizer = load_trained_model(model_path, tokenizer, hf_token, effective_base_model, force_device)
         
-        return model, model_tokenizer, effective_base_model, model_path
+        return model, model_tokenizer, effective_base_model
         
     except Exception as e:
         print(f"❌ Failed to load W&B artifact: {e}")
         import traceback
         traceback.print_exc()
-        return None, None, None, None
+        return None, None, None
     finally:
         # Ensure the download run is closed if it's still open
         if wandb_run is not None:
@@ -472,7 +472,9 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
                   use_async_tests: bool = False, max_concurrent_tests: Optional[int] = None,
                   use_evalplus: bool = False, evalplus_backend: str = "hf",
                   model_name_for_evalplus: Optional[str] = None,
-                  model_path_for_evalplus: Optional[str] = None) -> Dict[str, Any]:
+                  peft_moe_artifact: Optional[str] = None,
+                  peft_moe_base_model: Optional[str] = None,
+                  peft_moe_routing: str = "router") -> Dict[str, Any]:
     """Run all specified benchmarks on all models.
     
     Args:
@@ -485,14 +487,13 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
         max_concurrent_tests: Max concurrent tests (ignored if use_evalplus=True)
         use_evalplus: Use native EvalPlus framework
         evalplus_backend: EvalPlus backend (hf, vllm, etc.)
-        model_name_for_evalplus: Model name/path for EvalPlus (for base models)
-        model_path_for_evalplus: Model path for EvalPlus (for trained models)
+        model_name_for_evalplus: Model name/path for EvalPlus (required if use_evalplus=True)
     """
     
     if use_evalplus:
         # Use native EvalPlus benchmarks
-        if not model_name_for_evalplus and not model_path_for_evalplus:
-            raise ValueError("Either model_name_for_evalplus or model_path_for_evalplus is required when use_evalplus=True")
+        if not model_name_for_evalplus:
+            raise ValueError("model_name_for_evalplus is required when use_evalplus=True")
         
         # Map benchmark names to EvalPlus datasets
         evalplus_dataset_map = {
@@ -504,7 +505,8 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
         all_results = {}
         
         for model_name, model in models.items():
-            if model is None:
+            # For peft_moe backend, model is None since EvalPlus loads it directly
+            if model is None and evalplus_backend != "peft_moe":
                 print(f"⚠️  Skipping {model_name} (failed to load)")
                 continue
             
@@ -516,17 +518,27 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
                 
                 evalplus_dataset = evalplus_dataset_map[benchmark_name]
                 
+                # Construct backend-specific kwargs for peft_moe
+                backend_kwargs = {}
+                if evalplus_backend == "peft_moe":
+                    if peft_moe_artifact:
+                        backend_kwargs["wandb_artifact"] = peft_moe_artifact
+                    if peft_moe_base_model:
+                        backend_kwargs["base_model"] = peft_moe_base_model
+                    if peft_moe_routing:
+                        backend_kwargs["routing_strategy"] = peft_moe_routing
+                
                 # Create EvalPlus benchmark instance
                 benchmark = EvalPlusBenchmark(
                     tokenizer=tokenizer,
                     model_name=model_name_for_evalplus,
-                    model_path=model_path_for_evalplus,
                     dataset=evalplus_dataset,
                     max_new_tokens=4096,
                     greedy=True,
                     backend=evalplus_backend,
                     force_base_prompt=False,
-                    mini=False
+                    mini=False,
+                    backend_kwargs=backend_kwargs
                 )
                 
                 # Run benchmark (model is passed but not directly used by EvalPlus)
@@ -690,8 +702,8 @@ def parse_args(argv=None):
     )
     
     # Model arguments
-    parser.add_argument("--model_name", type=str, default=None,
-                       help="Base model name (e.g., 'google/codegemma-2b'). Only required for baseline comparison. Optional if using only --wandb_artifact or --trained_model.")
+    parser.add_argument("--model_name", type=str, default="google/codegemma-2b",
+                       help="Base model name (e.g., 'google/codegemma-2b'). Optional if using --wandb_artifact or --trained_model.")
     parser.add_argument("--trained_model", type=str, default=None,
                        help="Path to trained model directory (e.g., './results_full/best_model')")
     parser.add_argument("--wandb_artifact", type=str, default=None,
@@ -707,7 +719,16 @@ def parse_args(argv=None):
     parser.add_argument("--no_evalplus", action="store_false", dest="use_evalplus",
                        help="Disable EvalPlus and use legacy custom benchmarks")
     parser.add_argument("--evalplus_backend", type=str, default="hf",
-                       help="EvalPlus backend: hf (HuggingFace), vllm, etc. (default: hf)")
+                       help="EvalPlus backend: hf (HuggingFace), vllm, peft_moe, etc. (default: hf)")
+    
+    # PEFT MoE arguments
+    parser.add_argument("--peft_moe_artifact", type=str, default=None,
+                       help="W&B artifact path for PEFT MoE model (e.g., 'user/project/artifact:v0'). Enables peft_moe backend automatically.")
+    parser.add_argument("--peft_moe_base_model", type=str, default=None,
+                       help="Base model for PEFT MoE (e.g., 'google/codegemma-2b'). Auto-detected from checkpoint if not provided.")
+    parser.add_argument("--peft_moe_routing", type=str, default="router",
+                       help="Routing strategy for PEFT MoE: router, single:N, ensemble, best, round_robin (default: router)")
+    
     parser.add_argument("--use_async_tests", action="store_true", default=True,
                        help="Enable async test execution for improved GPU utilization (default: enabled for legacy benchmarks with --no_evalplus)")
     parser.add_argument("--no_async_tests", action="store_false", dest="use_async_tests",
@@ -759,11 +780,22 @@ def main(args=None):
     # Print device info at startup (with dtype override applied)
     print_device_info(dtype_override)
     
+    # Handle peft_moe backend configuration
+    if args.peft_moe_artifact:
+        # Automatically enable peft_moe backend when artifact is specified
+        args.evalplus_backend = "peft_moe"
+        args.use_evalplus = True
+        print(f"ℹ️  Auto-enabling peft_moe backend for artifact: {args.peft_moe_artifact}")
+        print(f"ℹ️  Routing strategy: {args.peft_moe_routing}")
+        # For peft_moe, we don't load base model separately - the decoder handles it
+        # Skip base model loading
+        args.model_name = None
+    
     # Validate arguments
-    if not args.wandb_artifact and not args.trained_model:
+    if not args.wandb_artifact and not args.trained_model and not args.peft_moe_artifact:
         print(f"ℹ️  Using default base model: {args.model_name}")
         if not args.model_name:
-            print("❌ Error: Must specify at least one of --model_name, --wandb_artifact, or --trained_model")
+            print("❌ Error: Must specify at least one of --model_name, --wandb_artifact, --trained_model, or --peft_moe_artifact")
             sys.exit(1)
     
     # Set logging preference (default: log to wandb unless --no_wandb specified)
@@ -774,19 +806,31 @@ def main(args=None):
     if args.wandb_key:
         os.environ["WANDB_API_KEY"] = args.wandb_key
     
+    # Try to determine base model from config files if not explicitly provided
+    config_base_model = None
+    if args.trained_model and os.path.exists(args.trained_model):
+        config_base_model = get_base_model_from_config(args.trained_model)
+    
+    # For W&B artifacts, we'll get the config after downloading
+    # So we handle that separately below
+    
+    # Use config base model if found and no explicit model_name argument was provided
+    # Check if model_name is the default value
+    if config_base_model and args.model_name == "google/codegemma-2b":
+        print(f"ℹ️  Using base model from trained model config: {config_base_model}")
+        args.model_name = config_base_model
+    
     # Prepare models dictionary
     models = {}
     
-    # Load base model ONLY if explicitly specified by user
+    # Load base model if specified
     if args.model_name:
-        print(f"\n📊 Loading base model for baseline comparison: {args.model_name}")
         base_model, tokenizer = load_base_model(args.model_name, hf_token, args.device)
         if base_model is None:
             print("❌ Cannot proceed without base model")
             sys.exit(1)
         models["base"] = base_model
     else:
-        print(f"\nℹ️  No --model_name specified, skipping baseline benchmark")
         # We'll get tokenizer from the first loaded model
         tokenizer = None
     
@@ -799,10 +843,8 @@ def main(args=None):
                 tokenizer = trained_tokenizer
     
     # Load W&B artifact if specified
-    wandb_config_base_model = None
-    wandb_model_path = None
     if args.wandb_artifact:
-        wandb_model, wandb_tokenizer, wandb_config_base_model, wandb_model_path = load_wandb_artifact(
+        wandb_model, wandb_tokenizer, wandb_config_base_model = load_wandb_artifact(
             args.wandb_artifact, tokenizer, hf_token, args.model_name, args.device
         )
         if wandb_model is not None:
@@ -810,24 +852,37 @@ def main(args=None):
             if tokenizer is None:
                 tokenizer = wandb_tokenizer
             
-            # Note: We do NOT automatically load base model from config for baseline comparison
-            # User must explicitly specify --model_name for baseline comparison
-            if wandb_config_base_model and not args.model_name:
-                print(f"ℹ️  W&B artifact config contains base model: {wandb_config_base_model}")
-                print(f"   To run baseline comparison, add: --model_name {wandb_config_base_model}")
+            # If we found a config base model from wandb artifact and haven't loaded base model yet
+            if wandb_config_base_model and "base" not in models:
+                print(f"ℹ️  Loading base model from W&B artifact config: {wandb_config_base_model}")
+                base_model, base_tokenizer = load_base_model(wandb_config_base_model, hf_token, args.device)
+                if base_model is not None:
+                    models["base"] = base_model
+                    if tokenizer is None:
+                        tokenizer = base_tokenizer
         else:
             print("⚠️  Warning: W&B artifact model failed to load, but will continue with other models")
+            # Even if wandb artifact failed, we might still have base model loaded
+            # So don't exit here, just log the warning
     
     # Validate that we have at least one model and tokenizer
-    if len(models) == 0:
+    # Exception: peft_moe backend doesn't need pre-loaded models
+    if len(models) == 0 and not args.peft_moe_artifact:
         print("❌ No models loaded successfully")
         sys.exit(1)
     
-    if tokenizer is None:
+    if tokenizer is None and not args.peft_moe_artifact:
         print("❌ No tokenizer available")
         sys.exit(1)
     
-    print(f"\n✅ Successfully loaded {len(models)} model(s): {list(models.keys())}")
+    if args.peft_moe_artifact:
+        # For peft_moe, create a dummy models dict for the benchmark loop
+        # The actual model will be loaded by EvalPlus
+        models = {"peft_moe": None}
+        tokenizer = None  # EvalPlus will load tokenizer
+        print(f"\n✅ PEFT MoE backend enabled: {args.peft_moe_artifact}")
+    else:
+        print(f"\n✅ Successfully loaded {len(models)} model(s): {list(models.keys())}")
     
     # Initialize W&B if logging requested (default: True, unless --no_wandb)
     if log_to_wandb:
@@ -855,25 +910,24 @@ def main(args=None):
         
         # Determine model name for EvalPlus
         model_name_for_evalplus = None
-        model_path_for_evalplus = None
-        
         if args.use_evalplus:
             # Use the actual model path/name for EvalPlus
-            if args.trained_model:
-                # For trained models, use the path directly
-                model_path_for_evalplus = args.trained_model
+            if args.peft_moe_artifact:
+                # For peft_moe, use placeholder - decoder will handle model loading
+                model_name_for_evalplus = "peft_moe_model"
+            elif args.trained_model:
+                # For trained models, we need the base model name since EvalPlus loads from HF
+                # Try to get it from config, otherwise use args.model_name
+                model_name_for_evalplus = get_base_model_from_config(args.trained_model) or args.model_name
             elif args.wandb_artifact:
-                # Use the W&B artifact model path
-                model_path_for_evalplus = wandb_model_path
+                # Similar for W&B artifacts
+                model_name_for_evalplus = args.model_name
             else:
-                # For base model, use the model_name
+                # For base model, use the model_name directly
                 model_name_for_evalplus = args.model_name
             
-            print(f"EvalPlus will use:")
-            if model_path_for_evalplus:
-                print(f"  Model path: {model_path_for_evalplus}")
-            if model_name_for_evalplus:
-                print(f"  Model name: {model_name_for_evalplus}")
+            if not args.peft_moe_artifact:
+                print(f"EvalPlus will use model: {model_name_for_evalplus}")
         
         results = run_benchmarks(
             models=models,
@@ -886,7 +940,9 @@ def main(args=None):
             use_evalplus=args.use_evalplus,
             evalplus_backend=args.evalplus_backend,
             model_name_for_evalplus=model_name_for_evalplus,
-            model_path_for_evalplus=model_path_for_evalplus
+            peft_moe_artifact=args.peft_moe_artifact,
+            peft_moe_base_model=args.peft_moe_base_model,
+            peft_moe_routing=args.peft_moe_routing
         )
         
         # Compare results
@@ -904,4 +960,9 @@ def main(args=None):
 
 
 if __name__ == "__main__":
+    # Protect imports for Windows multiprocessing
+    # This prevents re-import issues when EvalPlus spawns worker processes
+    import multiprocessing
+    multiprocessing.freeze_support()
+    
     main()

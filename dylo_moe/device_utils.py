@@ -153,10 +153,13 @@ def print_device_info(force_dtype: Optional[str] = None, force_device: Optional[
     print(f"Dtype: {dtype}")
     print(f"Device Map: {device_map}")
     
-    if device == 'cuda':
+    if device.startswith('cuda'):
+        print("NVIDIA GPU acceleration enabled")
         print(f"CUDA Devices: {torch.cuda.device_count()}")
         for i in range(torch.cuda.device_count()):
             print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+            print(f"  GPU {i} free memory: {torch.cuda.memory_reserved(i) - torch.cuda.memory_allocated(i)} bytes") 
+            
     elif device == 'mps':
         print("Apple Silicon GPU acceleration enabled")
     else:
