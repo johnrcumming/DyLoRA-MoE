@@ -21,7 +21,7 @@ def print_trainable_parameters(model: nn.Module):
     )
 
 def save_dylo_moe_state(model: "DyLoRA_MoE", save_directory: str):
-    """Saves the router and skill library state to a directory."""
+    """Saves the router state to a directory."""
     if not os.path.exists(save_directory):
         os.makedirs(save_directory)
     
@@ -32,14 +32,6 @@ def save_dylo_moe_state(model: "DyLoRA_MoE", save_directory: str):
         print(f"Router state saved to {router_path}")
     else:
         print("Router or router.save method not found. Skipping.")
-
-    # Save skill library
-    skill_library_path = os.path.join(save_directory, "skill_library.pt")
-    if hasattr(model, 'skill_library') and hasattr(model.skill_library, 'save'):
-        model.skill_library.save(skill_library_path)
-        print(f"Skill library saved to {skill_library_path}")
-    else:
-        print("Skill library or skill_library.save method not found. Skipping.")
 
 def save_lora_experts(model: "DyLoRA_MoE", save_directory: str):
     """Saves only the trainable LoRA expert weights and lm_head to a directory."""

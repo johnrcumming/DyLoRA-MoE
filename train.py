@@ -431,22 +431,6 @@ class PeftCheckpointCallback(TrainerCallback):
             except:
                 pass
         
-        # Save skill library if present (DyLoRA-specific component)
-        if hasattr(model, 'skill_library'):
-            skill_library_path = os.path.join(checkpoint_dir, "skill_library.safetensors")
-            try:
-                from safetensors.torch import save_file
-                skill_state = model.skill_library.state_dict()
-                save_file(skill_state, skill_library_path)
-                print(f"   ✓ Skill library saved")
-            except Exception as e:
-                # Fallback to torch.save
-                try:
-                    torch.save(model.skill_library.state_dict(), 
-                             skill_library_path.replace('.safetensors', '.pt'))
-                except:
-                    pass
-        
         # Create a minimal config.json with DyLoRA-MoE markers
         # This prevents the Trainer from saving a full model config
         config_path = os.path.join(checkpoint_dir, "config.json")
@@ -497,7 +481,7 @@ class PeftCheckpointCallback(TrainerCallback):
                 print(f"      - {filename} ({size_mb:.1f} MB)")
         
         print(f"✓ Complete MoE-PEFT checkpoint saved for step {state.global_step}")
-        print(f"  Structure: adapters/ + router.safetensors + skill_library.safetensors")
+        print(f"  Structure: adapters/ + router.safetensors")
         print(f"  Compatible with PEFT's attach_router() pattern\n")
         
         return control
@@ -1508,8 +1492,7 @@ def main(args):
     print(f"   │   ├── expert_2.pt                (Expert 2 LoRA weights)")
     print(f"   │   └── expert_3.pt                (Expert 3 LoRA weights)")
     print(f"   └── 📁 dylo_moe_state/")
-    print(f"       ├── router.pt                  (Router state)")
-    print(f"       └── skill_library.pt           (Skill library state)")
+    print(f"       └── router.pt                  (Router state)")
     print(f"{'='*80}")
     print(f"\n✓ Model saved in PEFT-separated format (MoE routing preserved)")
     print(f"✓ Base model ({args.model_name}) will be loaded separately during inference")
