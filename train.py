@@ -972,17 +972,10 @@ def main(args):
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
-        allow_expert_growth=False,  # Disable dynamic expert growth for traditional training
         balance_coefficient=args.balance_coefficient  # Load balancing auxiliary loss coefficient
     )
     
-    # Configure expert maturity for training strategy
-    # Keep experts immature (0) for dense routing during training
-    # This ensures all experts receive gradients and prevents early collapse to single expert
-    for i in range(model.expert_manager.num_experts):
-        model.router.set_expert_maturity(i, 0)  # Keep immature for dense collaboration
-    
-    print(f"Initialized {model.expert_manager.num_experts} experts (keeping immature for dense training)")
+    print(f"Initialized {model.expert_manager.num_experts} experts")
     print(f"⚠️  Router will use DENSE (softmax) routing during training to prevent expert collapse")
     print(f"   All experts will receive gradients. Sparse (top-k) routing only used at inference.")
     
