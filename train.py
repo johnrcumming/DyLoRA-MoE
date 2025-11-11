@@ -198,6 +198,8 @@ class DyLoRAMonitoringCallback(TrainerCallback):
         
     def on_step_end(self, args, state, control, **kwargs):
         """Called at the end of each training step to collect routing statistics."""
+        # Only log on logging_steps intervals, but use commit=False to avoid step conflicts
+        # The Trainer will commit the logs, so we just add our metrics to the same step
         if state.global_step % args.logging_steps == 0:
             # Get the last routing weights from the model
             # These are stored during forward pass as [batch, seq_len, num_experts]
@@ -290,14 +292,16 @@ class DyLoRAMonitoringCallback(TrainerCallback):
                     log_dict["routing/confidence_min"] = max_routing_weights.min().item()
                     log_dict["routing/confidence_max"] = max_routing_weights.max().item()
                     
-                    # Log all metrics to wandb
-                    wandb.log(log_dict, step=state.global_step)
+                    # Log all metrics to wandb with commit=False
+                    # This avoids step number conflicts with Trainer's logging
+                    # The Trainer will commit all metrics together
+                    wandb.log(log_dict, step=state.global_step, commit=False)
                 else:
                     # Edge case: no routing weights (shouldn't happen in normal training)
                     wandb.log({
                         "routing/warning": 1.0,
                         "routing/total_weight": 0.0
-                    }, step=state.global_step)
+                    }, step=state.global_step, commit=False)
 
 
 class BenchmarkCallback(TrainerCallback):
@@ -797,6 +801,7 @@ def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use
                 
                 # Initialize EvalPlus benchmark
                 evalplus_bench = EvalPlusBenchmark(
+                    tokenizer=tokenizer,
                     model_name=model_name,
                     dataset=dataset,
                     backend=evalplus_backend,
@@ -804,7 +809,7 @@ def run_benchmark_suite(model, tokenizer, benchmark_names, max_samples=None, use
                 )
                 
                 # Run benchmark
-                result = evalplus_bench.run_benchmark(max_samples=max_samples)
+                result = evalplus_bench.run_benchmark(model=model, max_samples=max_samples)
                 all_results[benchmark_name] = result
                 
                 # Print summary
