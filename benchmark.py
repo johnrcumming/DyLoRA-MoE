@@ -955,31 +955,41 @@ def main(args=None):
         args.peft_moe_base_model = config_base_model
         # Don't load model separately - peft_moe decoder handles it
         args.model_name = None
+        # Clear trained_model to prevent duplicate loading below
+        trained_model_path = args.trained_model
+        args.trained_model = None
     
     # Prepare models dictionary
     models = {}
     
-    # Skip model loading if using EvalPlus with standard backends (hf, vllm, etc.)
-    # EvalPlus loads models internally, so pre-loading wastes memory
-    skip_model_loading = args.use_evalplus and args.evalplus_backend not in ["peft_moe"]
+    # Skip model loading if using EvalPlus (all backends load models internally)
+    # This includes peft_moe, hf, vllm, etc.
+    skip_model_loading = args.use_evalplus
     
     if skip_model_loading:
         print(f"\nℹ️  Skipping model pre-loading (EvalPlus backend '{args.evalplus_backend}' loads models internally)")
-        # Still need to get the base model name for EvalPlus
-        if args.trained_model and os.path.exists(args.trained_model):
-            config_base_model = get_base_model_from_config(args.trained_model)
-            if config_base_model and args.model_name == "google/codegemma-2b":
-                print(f"   Using base model from config: {config_base_model}")
-                args.model_name = config_base_model
         
-        # Load tokenizer only (lightweight)
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=hf_token)
-        tokenizer.pad_token = tokenizer.eos_token
-        print(f"   Loaded tokenizer from: {args.model_name}")
-        
-        # Create dummy model dict for the benchmark loop
-        # EvalPlus will load the actual model
-        models = {"evalplus": None}
+        # For peft_moe backend, skip tokenizer loading too (decoder handles it)
+        if args.evalplus_backend == "peft_moe":
+            tokenizer = None
+            models = {"peft_moe": None}
+        else:
+            # For other backends (hf, vllm), load tokenizer
+            # Still need to get the base model name for EvalPlus
+            if args.trained_model and os.path.exists(args.trained_model):
+                config_base_model = get_base_model_from_config(args.trained_model)
+                if config_base_model and args.model_name == "google/codegemma-2b":
+                    print(f"   Using base model from config: {config_base_model}")
+                    args.model_name = config_base_model
+            
+            # Load tokenizer only (lightweight)
+            tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=hf_token)
+            tokenizer.pad_token = tokenizer.eos_token
+            print(f"   Loaded tokenizer from: {args.model_name}")
+            
+            # Create dummy model dict for the benchmark loop
+            # EvalPlus will load the actual model
+            models = {"evalplus": None}
     
     else:
         # Legacy behavior: Load models for custom benchmarks or peft_moe backend
