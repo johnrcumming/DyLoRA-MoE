@@ -127,12 +127,19 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
         is_dylora_moe = False
         base_model_name = None
         
-        # Check for legacy DyLoRA-MoE state directory (strong indicator)
-        parent_dir = os.path.dirname(model_path)
-        dylo_moe_state_dir = os.path.join(parent_dir, "dylo_moe_state")
+        # Check for DyLoRA-MoE state directory (strong indicator)
+        # First check in model_path itself (new PEFT checkpoint format)
+        dylo_moe_state_dir = os.path.join(model_path, "dylo_moe_state")
         if os.path.exists(dylo_moe_state_dir):
-            print("Found legacy DyLoRA-MoE state directory - treating as DyLoRA-MoE model")
+            print("Found DyLoRA-MoE state directory - treating as DyLoRA-MoE model")
             is_dylora_moe = True
+        else:
+            # Fallback: check parent directory (legacy format)
+            parent_dir = os.path.dirname(model_path)
+            dylo_moe_state_dir = os.path.join(parent_dir, "dylo_moe_state")
+            if os.path.exists(dylo_moe_state_dir):
+                print("Found legacy DyLoRA-MoE state directory - treating as DyLoRA-MoE model")
+                is_dylora_moe = True
         
         if os.path.exists(config_path):
             try:
@@ -186,15 +193,25 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                 print("  Loading as proper DyLoRA-MoE PEFT model...")
                 
                 try:
-                    # Load DyLoRA-MoE config from dylo_moe_state
+                    # Load DyLoRA-MoE config
+                    # Try new format: dylo_moe_state/config.json
                     dylo_config_path = os.path.join(dylo_moe_state_dir, "config.json")
-                    with open(dylo_config_path, 'r') as f:
-                        dylo_config = json.load(f)
-                    
-                    num_experts = dylo_config.get("num_experts", 4)
-                    lora_r = dylo_config.get("lora_r", 16)
-                    lora_alpha = dylo_config.get("lora_alpha", 32)
-                    lora_dropout = dylo_config.get("lora_dropout", 0.05)
+                    if os.path.exists(dylo_config_path):
+                        with open(dylo_config_path, 'r') as f:
+                            dylo_config = json.load(f)
+                        num_experts = dylo_config.get("num_experts", 4)
+                        lora_r = dylo_config.get("lora_r", 16)
+                        lora_alpha = dylo_config.get("lora_alpha", 32)
+                        lora_dropout = dylo_config.get("lora_dropout", 0.05)
+                    else:
+                        # Legacy format: check main config.json for _dylora_* fields
+                        print("  No dylo_moe_state/config.json found, checking main config for _dylora_* fields...")
+                        with open(config_path, 'r') as f:
+                            main_config = json.load(f)
+                        num_experts = main_config.get("_dylora_num_experts") or main_config.get("num_experts", 4)
+                        lora_r = main_config.get("_dylora_lora_r") or main_config.get("lora_r", 16)
+                        lora_alpha = main_config.get("_dylora_lora_alpha") or main_config.get("lora_alpha", 32)
+                        lora_dropout = main_config.get("_dylora_lora_dropout") or main_config.get("lora_dropout", 0.05)
                     
                     print(f"  Configuration: {num_experts} experts, r={lora_r}, alpha={lora_alpha}, dropout={lora_dropout}")
                     
@@ -214,12 +231,17 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                     # Load PEFT adapters for each expert
                     from peft import set_peft_model_state_dict
                     for expert_id in range(num_experts):
+                        # Try new format: expert_N/ directory with adapter_model files
                         expert_dir = os.path.join(peft_adapters_dir, f"expert_{expert_id}")
+                        expert_pt_file = os.path.join(peft_adapters_dir, f"expert_{expert_id}.pt")
+                        
+                        adapter_name = f"expert_{expert_id}"
+                        adapter_weights = None
+                        
                         if os.path.exists(expert_dir):
+                            # New format: directory with adapter_model.safetensors or adapter_model.bin
                             print(f"  Loading expert {expert_id} adapters from {expert_dir}")
-                            adapter_name = f"expert_{expert_id}"
                             
-                            # Load adapter weights
                             adapter_weights_file = os.path.join(expert_dir, "adapter_model.safetensors")
                             if not os.path.exists(adapter_weights_file):
                                 adapter_weights_file = os.path.join(expert_dir, "adapter_model.bin")
@@ -230,12 +252,18 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                                     adapter_weights = load_file(adapter_weights_file)
                                 else:
                                     adapter_weights = torch.load(adapter_weights_file, map_location="cpu")
-                                
-                                # Set adapter state dict for this expert
-                                model.expert_manager.model.set_adapter(adapter_name)
-                                set_peft_model_state_dict(model.expert_manager.model, adapter_weights, adapter_name)
-                            else:
-                                print(f"    ⚠️  Warning: No adapter weights found for expert {expert_id}")
+                        
+                        elif os.path.exists(expert_pt_file):
+                            # Legacy format: expert_N.pt file
+                            print(f"  Loading expert {expert_id} adapters from {expert_pt_file}")
+                            adapter_weights = torch.load(expert_pt_file, map_location="cpu")
+                        
+                        if adapter_weights is not None:
+                            # Set adapter state dict for this expert
+                            model.expert_manager.model.set_adapter(adapter_name)
+                            set_peft_model_state_dict(model.expert_manager.model, adapter_weights, adapter_name)
+                        else:
+                            print(f"    ⚠️  Warning: No adapter weights found for expert {expert_id}")
                     
                     # Load router state
                     router_state_file = os.path.join(dylo_moe_state_dir, "router.pt")
