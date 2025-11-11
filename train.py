@@ -425,12 +425,33 @@ class PeftCheckpointCallback(TrainerCallback):
         except Exception as e:
             print(f"   ✗ Failed to create config.json: {e}")
         
-        # CRITICAL: Tell the Trainer NOT to save the model weights
-        # This prevents the massive merged model files from being created
-        control.should_save = False
+        # CRITICAL: Delete merged model files if they exist (Trainer may have saved them already)
+        # This prevents the massive 11GB model.safetensors or pytorch_model.bin files
+        merged_model_files = [
+            os.path.join(checkpoint_dir, "model.safetensors"),
+            os.path.join(checkpoint_dir, "pytorch_model.bin"),
+            os.path.join(checkpoint_dir, "model.safetensors.index.json"),
+            os.path.join(checkpoint_dir, "pytorch_model.bin.index.json"),
+        ]
+        
+        files_deleted = []
+        for model_file in merged_model_files:
+            if os.path.exists(model_file):
+                try:
+                    file_size_mb = os.path.getsize(model_file) / (1024 * 1024)
+                    os.remove(model_file)
+                    files_deleted.append((os.path.basename(model_file), file_size_mb))
+                except Exception as e:
+                    print(f"   ⚠️  Failed to delete {model_file}: {e}")
+        
+        if files_deleted:
+            total_saved_mb = sum(size for _, size in files_deleted)
+            print(f"   🗑️  Deleted merged model files (saved {total_saved_mb:.1f} MB):")
+            for filename, size_mb in files_deleted:
+                print(f"      - {filename} ({size_mb:.1f} MB)")
         
         print(f"✓ PEFT-only checkpoint complete for step {state.global_step}")
-        print(f"   (Full model weights NOT saved to reduce disk usage)\n")
+        print(f"   (Checkpoint size: ~100MB adapters + router, NOT 2.6GB merged model)\n")
         
         return control
 
@@ -1179,6 +1200,7 @@ def main(args):
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=2,
+        save_safetensors=False,  # CRITICAL: Prevent Trainer from saving model.safetensors (11GB merged model)
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",  # Track validation loss to prevent overfitting
         greater_is_better=False,

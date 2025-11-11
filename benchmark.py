@@ -932,13 +932,23 @@ def main(args=None):
     # Try to determine base model from config files if not explicitly provided
     config_base_model = None
     is_peft_checkpoint = False
+    
+    # Check for PEFT checkpoint in trained_model (local path)
     if args.trained_model and os.path.exists(args.trained_model):
         config_base_model = get_base_model_from_config(args.trained_model)
         # Check if this is a PEFT checkpoint (has peft_adapters directory)
         is_peft_checkpoint = os.path.exists(os.path.join(args.trained_model, "peft_adapters"))
     
-    # For W&B artifacts, we'll get the config after downloading
-    # So we handle that separately below
+    # Assume W&B artifacts are PEFT checkpoints unless benchmarking a base model
+    # Base models don't have the project structure "user/project/artifact:version"
+    if args.wandb_artifact and not is_peft_checkpoint:
+        # W&B artifacts with our naming pattern are PEFT checkpoints
+        # Format: "user/project/model:version" (e.g., "johnrcumming001/dylo-moe-full-training/best-dylora-model-full:v18")
+        is_peft_checkpoint = True
+        print(f"ℹ️  Treating W&B artifact as PEFT checkpoint: {args.wandb_artifact}")
+        # Store it as peft_moe_artifact for later use
+        if not args.peft_moe_artifact:
+            args.peft_moe_artifact = args.wandb_artifact
     
     # Use config base model if found and no explicit model_name argument was provided
     # Check if model_name is the default value
@@ -950,10 +960,11 @@ def main(args=None):
     if is_peft_checkpoint and args.use_evalplus and args.evalplus_backend == "hf":
         print(f"ℹ️  Detected PEFT checkpoint, switching to peft_moe backend")
         args.evalplus_backend = "peft_moe"
-        # Store trained_model path for peft_moe backend
-        args.peft_moe_artifact = args.trained_model
+        # Store trained_model path for peft_moe backend (if not already set from wandb_artifact)
+        if not args.peft_moe_artifact:
+            args.peft_moe_artifact = args.trained_model
         args.peft_moe_base_model = config_base_model
-        # Don't load model separately - peft_moe decoder handles it
+        # Don't load model separately - peGqkkqft_moe decoder handles it
         args.model_name = None
         # Clear trained_model to prevent duplicate loading below
         trained_model_path = args.trained_model
