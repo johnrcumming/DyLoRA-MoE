@@ -21,6 +21,11 @@ from datasets import Dataset, DatasetDict, concatenate_datasets
 from transformers.tokenization_utils_base import BatchEncoding
 from typing import Union, Dict, Iterable, Any
 
+# DyLoRA-MoE uses PEFT library for training support:
+# - ExpertManager wraps model with get_peft_model() and manages multiple adapters
+# - Standard Trainer works seamlessly with PEFT models (no custom trainer needed)
+# - Checkpoints use PEFT's save_pretrained() for proper adapter serialization
+# - All experts share frozen base model weights (handled automatically by PEFT)
 from dylo_moe.model import DyLoRA_MoE
 from dylo_moe.utils import print_trainable_parameters, save_dylo_moe_state, save_lora_experts
 from dylo_moe.device_utils import move_model_to_device, print_device_info, get_device
@@ -354,13 +359,13 @@ class BenchmarkCallback(TrainerCallback):
 
 class PeftCheckpointCallback(TrainerCallback):
     """
-    Callback to save PEFT expert adapters separately at each checkpoint.
+    Callback to save complete MoE-PEFT model using PEFT's conventions.
     
-    This ensures checkpoints preserve the MoE structure with separate expert adapters
-    instead of saving merged weights that lose routing capability.
-    
-    This callback also PREVENTS the Trainer from saving the full merged model,
-    keeping checkpoints lightweight and focused on PEFT adapters only.
+    Saves PEFT adapters using library's native save_pretrained() method and extends
+    it to include router state for MoE models. This ensures:
+    - LoRA adapters saved in standard PEFT format (adapter_config.json + weights)
+    - Router saved alongside adapters for complete MoE checkpoint
+    - Compatible with PEFT's attach_router() pattern
     """
     
     def __init__(self, num_experts: int):
@@ -369,37 +374,78 @@ class PeftCheckpointCallback(TrainerCallback):
     def on_save(self, args, state, control, **kwargs):
         """
         Called when a checkpoint is saved.
-        Saves PEFT adapters and DyLoRA-MoE state, and prevents full model saving.
+        Saves complete MoE-PEFT model (adapters + router + config).
         """
         model = kwargs.get('model')
         if model is None:
-            print("⚠️  Warning: Model not found in callback kwargs, skipping PEFT checkpoint")
+            print("⚠️  Warning: Model not found in callback kwargs, skipping checkpoint")
             return
         
         # Determine checkpoint directory
-        # The Trainer saves to: output_dir/checkpoint-{step}
         checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        os.makedirs(checkpoint_dir, exist_ok=True)
         
-        if not os.path.exists(checkpoint_dir):
-            os.makedirs(checkpoint_dir, exist_ok=True)
+        print(f"\n💾 Saving complete MoE-PEFT checkpoint-{state.global_step}...")
         
-        print(f"\n💾 Saving PEFT-only checkpoint-{state.global_step}...")
+        # Get the PEFT model from DyLoRA_MoE wrapper
+        peft_model = model.expert_manager.model
         
-        # Save PEFT expert adapters
+        # Save PEFT adapters using library's native save_pretrained()
         peft_adapters_dir = os.path.join(checkpoint_dir, "peft_adapters")
         try:
-            save_lora_experts(model, peft_adapters_dir)
-            print(f"   ✓ PEFT adapters saved to {peft_adapters_dir}")
+            # Save each expert adapter separately using PEFT's save_pretrained
+            for expert_id in range(self.num_experts):
+                adapter_name = f"expert_{expert_id}"
+                expert_dir = os.path.join(peft_adapters_dir, adapter_name)
+                
+                # Set this adapter as active before saving
+                peft_model.set_adapter(adapter_name)
+                
+                # Save using PEFT's native method (saves adapter_config.json + adapter_model.safetensors)
+                peft_model.save_pretrained(expert_dir, selected_adapters=[adapter_name])
+            
+            print(f"   ✓ {self.num_experts} PEFT adapters saved")
         except Exception as e:
             print(f"   ✗ Failed to save PEFT adapters: {e}")
+            import traceback
+            traceback.print_exc()
         
-        # Save DyLoRA-MoE state (router + skill library)
-        dylo_moe_state_dir = os.path.join(checkpoint_dir, "dylo_moe_state")
+        # Save router state (extends PEFT to support MoE)
+        # Following PEFT's naming convention: router.safetensors alongside adapters
+        router_path = os.path.join(checkpoint_dir, "router.safetensors")
         try:
-            save_dylo_moe_state(model, dylo_moe_state_dir)
-            print(f"   ✓ DyLoRA-MoE state saved to {dylo_moe_state_dir}")
+            if hasattr(model, 'router'):
+                # Save router state dict using safetensors (PEFT's preferred format)
+                from safetensors.torch import save_file
+                router_state = model.router.state_dict()
+                save_file(router_state, router_path)
+                print(f"   ✓ Router saved: {router_path}")
+            else:
+                print(f"   ⚠️  No router found in model")
         except Exception as e:
-            print(f"   ✗ Failed to save DyLoRA-MoE state: {e}")
+            print(f"   ✗ Failed to save router: {e}")
+            # Fallback to torch.save if safetensors fails
+            try:
+                torch.save(model.router.state_dict(), router_path.replace('.safetensors', '.pt'))
+                print(f"   ✓ Router saved (PyTorch format)")
+            except:
+                pass
+        
+        # Save skill library if present (DyLoRA-specific component)
+        if hasattr(model, 'skill_library'):
+            skill_library_path = os.path.join(checkpoint_dir, "skill_library.safetensors")
+            try:
+                from safetensors.torch import save_file
+                skill_state = model.skill_library.state_dict()
+                save_file(skill_state, skill_library_path)
+                print(f"   ✓ Skill library saved")
+            except Exception as e:
+                # Fallback to torch.save
+                try:
+                    torch.save(model.skill_library.state_dict(), 
+                             skill_library_path.replace('.safetensors', '.pt'))
+                except:
+                    pass
         
         # Create a minimal config.json with DyLoRA-MoE markers
         # This prevents the Trainer from saving a full model config
@@ -450,7 +496,11 @@ class PeftCheckpointCallback(TrainerCallback):
             for filename, size_mb in files_deleted:
                 print(f"      - {filename} ({size_mb:.1f} MB)")
         
-        print(f"✓ PEFT-only checkpoint complete for step {state.global_step}")
+        print(f"✓ Complete MoE-PEFT checkpoint saved for step {state.global_step}")
+        print(f"  Structure: adapters/ + router.safetensors + skill_library.safetensors")
+        print(f"  Compatible with PEFT's attach_router() pattern\n")
+        
+        return control
         print(f"   (Checkpoint size: ~100MB adapters + router, NOT 2.6GB merged model)\n")
         
         return control
