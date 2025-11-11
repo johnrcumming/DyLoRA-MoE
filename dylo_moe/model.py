@@ -9,9 +9,8 @@ class DyLoRA_MoE(nn.Module):
     """
     Implements the Dynamic LoRA-based Mixture-of-Experts (DyLoRA-MoE) architecture.
     """
-    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05, token: str | None = None, allow_expert_growth: bool = True, balance_coefficient: float = 0.01):
+    def __init__(self, model_name: str, num_experts: int = 1, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05, token: str | None = None, balance_coefficient: float = 0.01):
         super().__init__()
-        self.allow_expert_growth = allow_expert_growth
         self.balance_coefficient = balance_coefficient  # Coefficient for load balancing auxiliary loss
 
         # 1. Load base model
@@ -28,8 +27,10 @@ class DyLoRA_MoE(nn.Module):
         self.config = self.foundation_model.config
 
         # 2. Untie lm_head if tied
+        from dylo_moe.utils import get_transformer_component, log_trainable_parameters
+        
         if getattr(self.foundation_model.config, "tie_word_embeddings", False):
-            transformer = self._get_transformer()
+            transformer = get_transformer_component(self.foundation_model)
             if hasattr(transformer, "wte"):
                 lm_head_weights = transformer.wte.weight
             elif hasattr(transformer, "embed_tokens"):
@@ -42,7 +43,7 @@ class DyLoRA_MoE(nn.Module):
                 bias=False,
             )
             self.foundation_model.lm_head.weight = nn.Parameter(lm_head_weights.clone())
-        self._log_trainable_parameters("After initializing lm_head")
+        log_trainable_parameters(self.foundation_model, "After initializing lm_head")
 
         # 3. Expert manager + initial experts
         self.expert_manager = ExpertManager(self.foundation_model, lora_r, lora_alpha, lora_dropout)
@@ -58,13 +59,11 @@ class DyLoRA_MoE(nn.Module):
         for name, param in self.foundation_model.named_parameters():
             if "lora" not in name.lower():
                 param.requires_grad = False
-        self._log_trainable_parameters("After attaching initial experts & freezing base")
+        log_trainable_parameters(self.foundation_model, "After attaching initial experts & freezing base")
 
         # 5. Router
         hidden_size = int(getattr(self.foundation_model.config, "hidden_size"))  # type: ignore[arg-type]
         self.router = DynamicHybridRouter(input_size=hidden_size, num_experts=num_experts)
-        for i in range(num_experts):
-            self.router.set_expert_maturity(i, 1)
         
         # 6. Routing tracking
         self.last_routing_weights = None  # For monitoring routing patterns
@@ -74,68 +73,8 @@ class DyLoRA_MoE(nn.Module):
         # 8. Device alignment
         self.router.to(self.foundation_model.device)
         
-
-    def _log_trainable_parameters(self, prefix: str = ""):
-        try:
-            parameters = list(self.foundation_model.parameters())
-            num_params = sum(p.numel() for p in parameters)
-            num_trainable = sum(p.numel() for p in parameters if p.requires_grad)
-
-            # Use logging instead of print for better maintainability
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(
-                "%s: Model parameters - Total: %s | Trainable: %s (%.2f%%)",
-                prefix,
-                f"{num_params:,}",
-                f"{num_trainable:,}",
-                (num_trainable / num_params * 100) if num_params > 0 else 0.0,
-            )
-        except Exception as e:
-            import warnings
-            warnings.warn(f"Could not log model parameters: {e}", RuntimeWarning)
-
-    def _get_transformer(self):
-        """
-        Get the transformer component from different model architectures.
-        """
-        # Common transformer attribute names for different model types
-        transformer_attrs = [
-            'transformer',      # GPT-2, GPT-Neo, GPT-J
-            'model',           # LLaMA, Mistral, Phi
-            'gpt_neox',        # GPT-NeoX
-            'bert',            # BERT-based models
-            'roberta',         # RoBERTa
-            'deberta',         # DeBERTa
-            'encoder',         # T5 encoder
-            'decoder',         # T5 decoder
-        ]
-        
-        for attr in transformer_attrs:
-            if hasattr(self.foundation_model, attr):
-                return getattr(self.foundation_model, attr)
-        
-        raise AttributeError(f"Could not find transformer component in {type(self.foundation_model).__name__}")
-
-    def _get_hidden_size(self):
-        """
-        Get the hidden size from different model configurations.
-        """
-        config = self.foundation_model.config
-        
-        # Common hidden size attribute names
-        hidden_size_attrs = [
-            'hidden_size',      # Most models
-            'n_embd',          # GPT-2 style
-            'd_model',         # T5 style
-            'dim',             # Some custom models
-        ]
-        
-        for attr in hidden_size_attrs:
-            if hasattr(config, attr):
-                return getattr(config, attr)
-        
-        raise AttributeError(f"Could not find hidden size in {type(config).__name__}")
+        from dylo_moe.utils import log_trainable_parameters
+        log_trainable_parameters(self.foundation_model, prefix="Initial model")
 
     def compute_load_balancing_loss(self, routing_weights: torch.Tensor) -> torch.Tensor:
         """
@@ -168,6 +107,29 @@ class DyLoRA_MoE(nn.Module):
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None, labels: torch.Tensor | None = None, expert_id: int | None = None):
         """
         Forward pass of the DyLoRA-MoE model.
+        
+        ROUTING ARCHITECTURE:
+        ---------------------
+        Multi-expert routing uses a 2-pass approach (much better than old N+1 passes):
+        
+        Pass 1 (hidden states extraction):
+            - Forward through base model to get final hidden states
+            - Router uses these to compute expert weights
+            
+        Pass 2 (single MoE pass):
+            - Activate all experts via PEFT's set_adapter([list])
+            - Single forward with routing_weights parameter
+            - PEFT automatically combines expert outputs
+        
+        This is necessary because:
+        1. Router needs hidden states to decide expert weights
+        2. PEFT's MoE requires all adapters active + routing_weights in single pass
+        3. Cannot get hidden states and route in a single call
+        
+        Alternative approaches (rejected):
+        - N+1 passes (1 base + N expert loops): Too slow, breaks gradient graph
+        - Hidden state caching: Breaks autograd, complicates implementation
+        - Pre-computed routing: Doesn't learn; defeats purpose of trainable router
         
         Args:
             input_ids: Input token IDs
@@ -277,17 +239,6 @@ class DyLoRA_MoE(nn.Module):
         Enables gradient checkpointing for the foundation model.
         """
         self.foundation_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
-
-    def set_training_mode(self, mode: str = "routing"):
-        """
-        Set the training mode for the model.
-        
-        Args:
-            mode: One of "routing" (use router to combine experts), 
-                  "single_expert" (train one expert at a time via expert_id parameter)
-        """
-        self.training_mode = mode
-        print(f"Training mode set to: {mode}")
 
     def generate(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None, **generate_kwargs):
         """

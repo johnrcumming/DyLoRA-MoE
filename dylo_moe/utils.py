@@ -1,10 +1,13 @@
 import os
 import torch
 import torch.nn as nn
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .model import DyLoRA_MoE
+
+logger = logging.getLogger(__name__)
 
 def print_trainable_parameters(model: nn.Module):
     """
@@ -19,6 +22,61 @@ def print_trainable_parameters(model: nn.Module):
     print(
         f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}"
     )
+
+def log_trainable_parameters(model: nn.Module, prefix: str = ""):
+    """
+    Logs detailed trainable parameter information for the model.
+    
+    Args:
+        model: PyTorch model to inspect
+        prefix: Optional prefix for log messages (e.g., "Before training", "After training")
+    """
+    try:
+        parameters = list(model.parameters())
+        num_params = sum(p.numel() for p in parameters)
+        num_trainable = sum(p.numel() for p in parameters if p.requires_grad)
+
+        logger.info(
+            "%s: Model parameters - Total: %s | Trainable: %s (%.2f%%)",
+            prefix,
+            f"{num_params:,}",
+            f"{num_trainable:,}",
+            (num_trainable / num_params * 100) if num_params > 0 else 0.0,
+        )
+    except Exception as e:
+        import warnings
+        warnings.warn(f"Could not log model parameters: {e}", RuntimeWarning)
+
+def get_transformer_component(model: nn.Module):
+    """
+    Get the transformer component from different model architectures.
+    
+    Args:
+        model: Model to extract transformer from
+        
+    Returns:
+        The transformer component (e.g., model.transformer, model.model, etc.)
+        
+    Raises:
+        AttributeError: If no known transformer component is found
+    """
+    # Common transformer attribute names for different model types
+    transformer_attrs = [
+        'transformer',      # GPT-2, GPT-Neo, GPT-J
+        'model',           # LLaMA, Mistral, Phi
+        'gpt_neox',        # GPT-NeoX
+        'bert',            # BERT-based models
+        'roberta',         # RoBERTa
+        'deberta',         # DeBERTa
+        'encoder',         # T5 encoder
+        'decoder',         # T5 decoder
+    ]
+    
+    for attr in transformer_attrs:
+        if hasattr(model, attr):
+            return getattr(model, attr)
+    
+    raise AttributeError(f"Could not find transformer component in {type(model).__name__}")
 
 def save_dylo_moe_state(model: "DyLoRA_MoE", save_directory: str):
     """Saves the router state to a directory."""

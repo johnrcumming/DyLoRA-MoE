@@ -5,6 +5,10 @@ import torch.nn.functional as F
 class DynamicHybridRouter(nn.Module):
     """
     Implements the Dynamic Hybrid Router for the DyLoRA-MoE architecture.
+    
+    The router learns to assign weights to experts based on input hidden states.
+    During training, uses dense softmax routing to ensure all experts receive gradients.
+    During inference, can use sparse top-k routing for efficiency.
     """
     def __init__(self, input_size: int, num_experts: int, top_k: int = 1, temperature: float = 2.0):
         super().__init__()
@@ -16,24 +20,27 @@ class DynamicHybridRouter(nn.Module):
         # Gating network
         self.gate = nn.Linear(self.input_size, self.num_experts)
 
-        # State to track expert maturity (0 for new, 1 for mature)
-        self.expert_maturity = torch.zeros(self.num_experts)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the router.
+        
+        Routes inputs to experts using dense (training) or sparse (inference) strategy:
+        - Training: Dense softmax over all experts to ensure gradient flow
+        - Inference: Sparse top-k selection for computational efficiency
+        
+        Args:
+            x: Input tensor of shape [batch, seq_len, hidden_size]
+            
+        Returns:
+            routing_weights: Tensor of shape [batch, seq_len, num_experts] with expert weights
         """
         # Get the routing weights from the gating network
         logits = self.gate(x)
         
-        # Ensure expert_maturity is on the same device as logits
-        if self.expert_maturity.device != logits.device:
-            self.expert_maturity = self.expert_maturity.to(logits.device)
-        
-        # The routing strategy depends on the maturity of the experts
-        # If there are new experts or in training mode, use dense collaboration
-        # to ensure gradients flow to all experts and the router
-        if torch.any(self.expert_maturity == 0) or self.training:
+        # Use training flag to determine routing strategy:
+        # - Dense during training for gradient flow to all experts and router
+        # - Sparse during inference for efficiency
+        if self.training:
             # Dense collaboration: use a softmax over all experts
             routing_weights = F.softmax(logits / self.temperature, dim=-1)
         else:
@@ -50,35 +57,10 @@ class DynamicHybridRouter(nn.Module):
 
         return routing_weights
 
-    def add_expert(self, device: torch.device | None = None) -> None:
-        """
-        Adds a new expert to the router.
-        """
-        self.num_experts += 1
-        
-        # Resize the gating network
-        new_gate = nn.Linear(self.input_size, self.num_experts)
-        new_gate.weight.data[:self.num_experts-1, :] = self.gate.weight.data
-        new_gate.bias.data[:self.num_experts-1] = self.gate.bias.data
-        self.gate = new_gate
-
-        if device:
-            self.to(device)
-
-        # Add a new entry to the expert maturity tracker
-        self.expert_maturity = torch.cat([self.expert_maturity, torch.zeros(1)])
-
-    def set_expert_maturity(self, expert_id: int, maturity: float) -> None:
-        """
-        Sets the maturity of an expert.
-        """
-        self.expert_maturity[expert_id] = maturity
-
     def save(self, path: str):
         """Saves the router's state to a file."""
         state = {
             'gate_state_dict': self.gate.state_dict(),
-            'expert_maturity': self.expert_maturity,
             'num_experts': self.num_experts,
             'input_size': self.input_size,
             'top_k': self.top_k,
@@ -97,7 +79,6 @@ class DynamicHybridRouter(nn.Module):
             temperature=state['temperature']
         )
         router.gate.load_state_dict(state['gate_state_dict'])
-        router.expert_maturity = state['expert_maturity']
         if device:
             router.to(device)
         return router
