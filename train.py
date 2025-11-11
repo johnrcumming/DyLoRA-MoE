@@ -358,6 +358,9 @@ class PeftCheckpointCallback(TrainerCallback):
     
     This ensures checkpoints preserve the MoE structure with separate expert adapters
     instead of saving merged weights that lose routing capability.
+    
+    This callback also PREVENTS the Trainer from saving the full merged model,
+    keeping checkpoints lightweight and focused on PEFT adapters only.
     """
     
     def __init__(self, num_experts: int):
@@ -366,7 +369,7 @@ class PeftCheckpointCallback(TrainerCallback):
     def on_save(self, args, state, control, **kwargs):
         """
         Called when a checkpoint is saved.
-        Saves PEFT adapters and DyLoRA-MoE state alongside the standard checkpoint.
+        Saves PEFT adapters and DyLoRA-MoE state, and prevents full model saving.
         """
         model = kwargs.get('model')
         if model is None:
@@ -378,10 +381,9 @@ class PeftCheckpointCallback(TrainerCallback):
         checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
         
         if not os.path.exists(checkpoint_dir):
-            print(f"⚠️  Warning: Checkpoint directory not found: {checkpoint_dir}")
-            return
+            os.makedirs(checkpoint_dir, exist_ok=True)
         
-        print(f"\n💾 Saving PEFT adapters for checkpoint-{state.global_step}...")
+        print(f"\n💾 Saving PEFT-only checkpoint-{state.global_step}...")
         
         # Save PEFT expert adapters
         peft_adapters_dir = os.path.join(checkpoint_dir, "peft_adapters")
@@ -399,26 +401,38 @@ class PeftCheckpointCallback(TrainerCallback):
         except Exception as e:
             print(f"   ✗ Failed to save DyLoRA-MoE state: {e}")
         
-        # Update config.json to mark as DyLoRA-MoE format
+        # Create a minimal config.json with DyLoRA-MoE markers
+        # This prevents the Trainer from saving a full model config
         config_path = os.path.join(checkpoint_dir, "config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                
-                # Add DyLoRA-MoE markers
-                config["model_type"] = "dylora-moe"
-                config["_dylora_format"] = "peft_separated"
-                config["_dylora_checkpoint_step"] = state.global_step
-                
-                with open(config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-                
-                print(f"   ✓ Updated config.json with DyLoRA-MoE markers")
-            except Exception as e:
-                print(f"   ✗ Failed to update config.json: {e}")
+        try:
+            # Get base model name from the foundation model
+            base_model_name = getattr(model.foundation_model.config, '_name_or_path', 'google/codegemma-2b')
+            
+            minimal_config = {
+                "model_type": "dylora-moe",
+                "_dylora_format": "peft_separated",
+                "_dylora_checkpoint_step": state.global_step,
+                "base_model_name_or_path": base_model_name,
+                "num_experts": self.num_experts,
+                "checkpoint_type": "peft_only",
+                "_note": "This is a PEFT-only checkpoint. Full model weights are NOT saved to save disk space."
+            }
+            
+            with open(config_path, 'w') as f:
+                json.dump(minimal_config, f, indent=2)
+            
+            print(f"   ✓ Created minimal config.json (PEFT-only checkpoint)")
+        except Exception as e:
+            print(f"   ✗ Failed to create config.json: {e}")
         
-        print(f"✓ PEFT checkpoint complete for step {state.global_step}\n")
+        # CRITICAL: Tell the Trainer NOT to save the model weights
+        # This prevents the massive merged model files from being created
+        control.should_save = False
+        
+        print(f"✓ PEFT-only checkpoint complete for step {state.global_step}")
+        print(f"   (Full model weights NOT saved to reduce disk usage)\n")
+        
+        return control
 
 
 def analyze_truncation_stats(texts, tokenizer, max_length=768, dataset_name="Dataset"):
@@ -1253,10 +1267,13 @@ def main(args):
     callbacks = [
         GradientMonitoringCallback(model, num_experts=model.expert_manager.num_experts),
         DyLoRAMonitoringCallback(model, num_experts=model.expert_manager.num_experts),
-        PeftCheckpointCallback(num_experts=model.expert_manager.num_experts),  # Save PEFT adapters at each checkpoint
+        PeftCheckpointCallback(num_experts=model.expert_manager.num_experts),  # Save PEFT adapters only (prevents full model saving)
     ]
     
-    print(f"✓ PEFT checkpoint saving enabled - will save separate expert adapters at each checkpoint")
+    print(f"✓ PEFT-only checkpoint saving enabled")
+    print(f"  • Checkpoints will contain PEFT adapters + router state ONLY")
+    print(f"  • Full merged model weights will NOT be saved (saves disk space)")
+    print(f"  • Use benchmark.py to load PEFT checkpoints for evaluation")
     
     # Add benchmark callback if strategy is 'epoch'
     if args.benchmark_strategy == 'epoch':

@@ -169,27 +169,105 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
             
             print(f"Loading DyLoRA-MoE model with base: {effective_base_model}")
             
-            # Load the DyLoRA-MoE model using the proper constructor
-            try:
-                # Get tokenizer first if not provided
-                if tokenizer is None:
-                    if os.path.exists(os.path.join(model_path, "tokenizer.json")):
-                        tokenizer = AutoTokenizer.from_pretrained(model_path, token=hf_token)
-                    else:
-                        tokenizer = AutoTokenizer.from_pretrained(effective_base_model, token=hf_token)
-                    tokenizer.pad_token = tokenizer.eos_token
+            # Get tokenizer first if not provided
+            if tokenizer is None:
+                if os.path.exists(os.path.join(model_path, "tokenizer.json")):
+                    tokenizer = AutoTokenizer.from_pretrained(model_path, token=hf_token)
+                else:
+                    tokenizer = AutoTokenizer.from_pretrained(effective_base_model, token=hf_token)
+                tokenizer.pad_token = tokenizer.eos_token
+            
+            # Check for PEFT checkpoint structure (saved by PeftCheckpointCallback)
+            peft_adapters_dir = os.path.join(model_path, "peft_adapters")
+            dylo_moe_state_dir = os.path.join(model_path, "dylo_moe_state")
+            
+            if os.path.exists(peft_adapters_dir) and os.path.exists(dylo_moe_state_dir):
+                print("✓ Found PEFT checkpoint structure (peft_adapters/ and dylo_moe_state/)")
+                print("  Loading as proper DyLoRA-MoE PEFT model...")
                 
-                # Load the DyLoRA-MoE model from the saved state
-                # trainer.save_model() on a PEFT model saves the PEFT structure
-                # Check for PEFT structure in the saved weights
+                try:
+                    # Load DyLoRA-MoE config from dylo_moe_state
+                    dylo_config_path = os.path.join(dylo_moe_state_dir, "config.json")
+                    with open(dylo_config_path, 'r') as f:
+                        dylo_config = json.load(f)
+                    
+                    num_experts = dylo_config.get("num_experts", 4)
+                    lora_r = dylo_config.get("lora_r", 16)
+                    lora_alpha = dylo_config.get("lora_alpha", 32)
+                    lora_dropout = dylo_config.get("lora_dropout", 0.05)
+                    
+                    print(f"  Configuration: {num_experts} experts, r={lora_r}, alpha={lora_alpha}, dropout={lora_dropout}")
+                    
+                    # Reconstruct DyLoRA-MoE model from PEFT adapters
+                    print(f"  Reconstructing DyLoRA-MoE from PEFT adapters...")
+                    model = DyLoRA_MoE(
+                        model_name=effective_base_model,
+                        num_experts=num_experts,
+                        lora_r=lora_r,
+                        lora_alpha=lora_alpha,
+                        lora_dropout=lora_dropout,
+                        token=hf_token,
+                        allow_expert_growth=False,
+                        balance_coefficient=0.0  # No balancing during inference
+                    )
+                    
+                    # Load PEFT adapters for each expert
+                    from peft import set_peft_model_state_dict
+                    for expert_id in range(num_experts):
+                        expert_dir = os.path.join(peft_adapters_dir, f"expert_{expert_id}")
+                        if os.path.exists(expert_dir):
+                            print(f"  Loading expert {expert_id} adapters from {expert_dir}")
+                            adapter_name = f"expert_{expert_id}"
+                            
+                            # Load adapter weights
+                            adapter_weights_file = os.path.join(expert_dir, "adapter_model.safetensors")
+                            if not os.path.exists(adapter_weights_file):
+                                adapter_weights_file = os.path.join(expert_dir, "adapter_model.bin")
+                            
+                            if os.path.exists(adapter_weights_file):
+                                if adapter_weights_file.endswith('.safetensors'):
+                                    from safetensors.torch import load_file
+                                    adapter_weights = load_file(adapter_weights_file)
+                                else:
+                                    adapter_weights = torch.load(adapter_weights_file, map_location="cpu")
+                                
+                                # Set adapter state dict for this expert
+                                model.expert_manager.model.set_adapter(adapter_name)
+                                set_peft_model_state_dict(model.expert_manager.model, adapter_weights, adapter_name)
+                            else:
+                                print(f"    ⚠️  Warning: No adapter weights found for expert {expert_id}")
+                    
+                    # Load router state
+                    router_state_file = os.path.join(dylo_moe_state_dir, "router.pt")
+                    if os.path.exists(router_state_file):
+                        print(f"  Loading router state from {router_state_file}")
+                        router_state = torch.load(router_state_file, map_location="cpu")
+                        model.router.load_state_dict(router_state)
+                    
+                    # Set all experts as mature for sparse routing during inference
+                    for i in range(num_experts):
+                        model.router.set_expert_maturity(i, 1)
+                    
+                    print("✓ Successfully loaded DyLoRA-MoE PEFT checkpoint")
+                    print(f"✓ Trained model loaded from: {model_path}")
+                    return model, tokenizer
+                    
+                except Exception as e:
+                    print(f"⚠️  Failed to load PEFT checkpoint structure: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    print("Falling back to merged model loading...")
+                    # Fall through to merged model loading below
+            else:
+                # No PEFT checkpoint structure found - check for merged model or standard PEFT format
+                print("⚠️  No PEFT checkpoint structure found (missing peft_adapters/ or dylo_moe_state/)")
                 
-                # Check if weights contain PEFT/LoRA structure
+                # Check if weights contain PEFT/LoRA structure (might be standard PEFT format)
                 model_file = os.path.join(model_path, "model.safetensors")
                 pytorch_model = os.path.join(model_path, "pytorch_model.bin")
                 has_peft_structure = False
                 
                 if os.path.exists(model_file):
-                    # Quick check: do weight keys contain PEFT indicators?
                     try:
                         from safetensors import safe_open
                         with safe_open(model_file, framework="pt", device="cpu") as f:
@@ -336,11 +414,6 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                         except Exception as alt_error:
                             print(f"❌ Alternative loading also failed: {alt_error}")
                             raise
-                        
-            except Exception as dylora_error:
-                print(f"❌ DyLoRA-MoE specific loading failed: {dylora_error}")
-                print("Trying generic loading approaches...")
-                raise  # Re-raise to try other methods
                 
         # Try PEFT adapter format
         elif os.path.exists(os.path.join(model_path, "adapter_config.json")):
