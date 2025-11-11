@@ -90,12 +90,16 @@ class EvalPlusBenchmark(BaseBenchmark):
         
         # Determine id_range for max_samples
         id_range = None
-        if max_samples:
+        if max_samples and max_samples > 1:
             dataset_obj = self.load_dataset()
             total_samples = len(dataset_obj)
             if max_samples < total_samples:
                 id_range = [0, max_samples - 1]
                 print(f"   Limiting to first {max_samples} samples")
+        elif max_samples == 1:
+            # For single sample, use id_range [0, 1) which will include only index 0
+            id_range = [0, 1]
+            print(f"   Limiting to first 1 sample")
         
         try:
             # Construct codegen arguments

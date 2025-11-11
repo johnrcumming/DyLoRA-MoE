@@ -270,7 +270,21 @@ def load_trained_model(model_path: str, tokenizer=None, hf_token: Optional[str] 
                     if os.path.exists(router_state_file):
                         print(f"  Loading router state from {router_state_file}")
                         router_state = torch.load(router_state_file, map_location="cpu")
-                        model.router.load_state_dict(router_state)
+                        
+                        # Handle nested state dict format (gate_state_dict is nested)
+                        if "gate_state_dict" in router_state:
+                            # Extract gate weights
+                            model.router.gate.load_state_dict(router_state["gate_state_dict"])
+                            # Load other router attributes
+                            if "expert_maturity" in router_state:
+                                model.router.expert_maturity = router_state["expert_maturity"]
+                            if "top_k" in router_state:
+                                model.router.top_k = router_state["top_k"]
+                            if "temperature" in router_state:
+                                model.router.temperature = router_state["temperature"]
+                        else:
+                            # Flat state dict format (older checkpoints)
+                            model.router.load_state_dict(router_state)
                     
                     # Set all experts as mature for sparse routing during inference
                     for i in range(num_experts):
@@ -623,7 +637,15 @@ def run_benchmarks(models: Dict[str, Any], tokenizer, benchmarks: list,
                 backend_kwargs = {}
                 if evalplus_backend == "peft_moe":
                     if peft_moe_artifact:
-                        backend_kwargs["wandb_artifact"] = peft_moe_artifact
+                        # Determine if this is a W&B artifact or local path
+                        # W&B artifacts have format: "entity/project/artifact:version"
+                        is_wandb_artifact = ":" in peft_moe_artifact and "/" in peft_moe_artifact and not os.path.exists(peft_moe_artifact)
+                        
+                        if is_wandb_artifact:
+                            backend_kwargs["wandb_artifact"] = peft_moe_artifact
+                        else:
+                            # Local path - use adapter_path instead
+                            backend_kwargs["adapter_path"] = peft_moe_artifact
                     if peft_moe_base_model:
                         backend_kwargs["base_model"] = peft_moe_base_model
                     if peft_moe_routing:
@@ -909,8 +931,11 @@ def main(args=None):
     
     # Try to determine base model from config files if not explicitly provided
     config_base_model = None
+    is_peft_checkpoint = False
     if args.trained_model and os.path.exists(args.trained_model):
         config_base_model = get_base_model_from_config(args.trained_model)
+        # Check if this is a PEFT checkpoint (has peft_adapters directory)
+        is_peft_checkpoint = os.path.exists(os.path.join(args.trained_model, "peft_adapters"))
     
     # For W&B artifacts, we'll get the config after downloading
     # So we handle that separately below
@@ -921,50 +946,84 @@ def main(args=None):
         print(f"ℹ️  Using base model from trained model config: {config_base_model}")
         args.model_name = config_base_model
     
+    # Auto-enable peft_moe backend for PEFT checkpoints when using EvalPlus
+    if is_peft_checkpoint and args.use_evalplus and args.evalplus_backend == "hf":
+        print(f"ℹ️  Detected PEFT checkpoint, switching to peft_moe backend")
+        args.evalplus_backend = "peft_moe"
+        # Store trained_model path for peft_moe backend
+        args.peft_moe_artifact = args.trained_model
+        args.peft_moe_base_model = config_base_model
+        # Don't load model separately - peft_moe decoder handles it
+        args.model_name = None
+    
     # Prepare models dictionary
     models = {}
     
-    # Load base model if specified
-    if args.model_name:
-        base_model, tokenizer = load_base_model(args.model_name, hf_token, args.device)
-        if base_model is None:
-            print("❌ Cannot proceed without base model")
-            sys.exit(1)
-        models["base"] = base_model
+    # Skip model loading if using EvalPlus with standard backends (hf, vllm, etc.)
+    # EvalPlus loads models internally, so pre-loading wastes memory
+    skip_model_loading = args.use_evalplus and args.evalplus_backend not in ["peft_moe"]
+    
+    if skip_model_loading:
+        print(f"\nℹ️  Skipping model pre-loading (EvalPlus backend '{args.evalplus_backend}' loads models internally)")
+        # Still need to get the base model name for EvalPlus
+        if args.trained_model and os.path.exists(args.trained_model):
+            config_base_model = get_base_model_from_config(args.trained_model)
+            if config_base_model and args.model_name == "google/codegemma-2b":
+                print(f"   Using base model from config: {config_base_model}")
+                args.model_name = config_base_model
+        
+        # Load tokenizer only (lightweight)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=hf_token)
+        tokenizer.pad_token = tokenizer.eos_token
+        print(f"   Loaded tokenizer from: {args.model_name}")
+        
+        # Create dummy model dict for the benchmark loop
+        # EvalPlus will load the actual model
+        models = {"evalplus": None}
+    
     else:
-        # We'll get tokenizer from the first loaded model
-        tokenizer = None
-    
-    # Load trained model if specified
-    if args.trained_model:
-        trained_model, trained_tokenizer = load_trained_model(args.trained_model, tokenizer, hf_token, force_device=args.device)
-        if trained_model is not None:
-            models["trained"] = trained_model
-            if tokenizer is None:
-                tokenizer = trained_tokenizer
-    
-    # Load W&B artifact if specified
-    if args.wandb_artifact:
-        wandb_model, wandb_tokenizer, wandb_config_base_model = load_wandb_artifact(
-            args.wandb_artifact, tokenizer, hf_token, args.model_name, args.device
-        )
-        if wandb_model is not None:
-            models["wandb"] = wandb_model
-            if tokenizer is None:
-                tokenizer = wandb_tokenizer
-            
-            # If we found a config base model from wandb artifact and haven't loaded base model yet
-            if wandb_config_base_model and "base" not in models:
-                print(f"ℹ️  Loading base model from W&B artifact config: {wandb_config_base_model}")
-                base_model, base_tokenizer = load_base_model(wandb_config_base_model, hf_token, args.device)
-                if base_model is not None:
-                    models["base"] = base_model
-                    if tokenizer is None:
-                        tokenizer = base_tokenizer
+        # Legacy behavior: Load models for custom benchmarks or peft_moe backend
+        # Load base model if specified
+        if args.model_name:
+            base_model, tokenizer = load_base_model(args.model_name, hf_token, args.device)
+            if base_model is None:
+                print("❌ Cannot proceed without base model")
+                sys.exit(1)
+            models["base"] = base_model
         else:
-            print("⚠️  Warning: W&B artifact model failed to load, but will continue with other models")
-            # Even if wandb artifact failed, we might still have base model loaded
-            # So don't exit here, just log the warning
+            # We'll get tokenizer from the first loaded model
+            tokenizer = None
+        
+        # Load trained model if specified
+        if args.trained_model:
+            trained_model, trained_tokenizer = load_trained_model(args.trained_model, tokenizer, hf_token, force_device=args.device)
+            if trained_model is not None:
+                models["trained"] = trained_model
+                if tokenizer is None:
+                    tokenizer = trained_tokenizer
+        
+        # Load W&B artifact if specified
+        if args.wandb_artifact:
+            wandb_model, wandb_tokenizer, wandb_config_base_model = load_wandb_artifact(
+                args.wandb_artifact, tokenizer, hf_token, args.model_name, args.device
+            )
+            if wandb_model is not None:
+                models["wandb"] = wandb_model
+                if tokenizer is None:
+                    tokenizer = wandb_tokenizer
+                
+                # If we found a config base model from wandb artifact and haven't loaded base model yet
+                if wandb_config_base_model and "base" not in models:
+                    print(f"ℹ️  Loading base model from W&B artifact config: {wandb_config_base_model}")
+                    base_model, base_tokenizer = load_base_model(wandb_config_base_model, hf_token, args.device)
+                    if base_model is not None:
+                        models["base"] = base_model
+                        if tokenizer is None:
+                            tokenizer = base_tokenizer
+            else:
+                print("⚠️  Warning: W&B artifact model failed to load, but will continue with other models")
+                # Even if wandb artifact failed, we might still have base model loaded
+                # So don't exit here, just log the warning
     
     # Validate that we have at least one model and tokenizer
     # Exception: peft_moe backend doesn't need pre-loaded models
