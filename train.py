@@ -1527,10 +1527,10 @@ def parse_args(argv=None):
     parser.add_argument("--num_experts", type=int, default=4, help="Number of LoRA experts to create (fixed at initialization).")
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA r value.")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha value.")
-    parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout value.")
+    parser.add_argument("--lora_dropout", type=float, default=0.1, help="LoRA dropout value (increased to 0.1 to prevent overfitting).")
     parser.add_argument("--balance_coefficient", type=float, default=0.15, help="Coefficient for load balancing auxiliary loss (0.1-0.5 recommended to prevent expert collapse; 0 to disable).")
-    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay (L2 regularization) coefficient to prevent overfitting (default: 0.01).")
-    parser.add_argument("--label_smoothing", type=float, default=0.0, help="Label smoothing factor to prevent overfitting (typical: 0.1, range: 0.0-0.3).")
+    parser.add_argument("--weight_decay", type=float, default=0.05, help="Weight decay (L2 regularization) coefficient to prevent overfitting (increased to 0.05 for better generalization).")
+    parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing factor to prevent overfitting (default: 0.1, range: 0.0-0.3 for stronger regularization).")
     parser.add_argument("--interleaved_sampling", action="store_true", help="Use interleaved sampling for balanced dataset representation (50/50 Code Alpaca and MBPP).")
     parser.add_argument("--cosine_restarts", action="store_true", help="Use cosine_with_restarts learning rate scheduler with 2 cycles for better exploration.")
     parser.add_argument("--lr_strategy", type=str, default="auto", choices=["auto", "constant", "linear", "cosine", "cosine_restarts"], 

@@ -75,13 +75,17 @@ See the **[Entrypoint Guide](ENTRYPOINT_GUIDE.md)** for complete Docker usage an
 
 ### Training
 
+> **✨ New as of 2026-01-15:** Training defaults now include anti-overfitting regularization (label smoothing=0.1, weight decay=0.05, LoRA dropout=0.1) for better generalization. See [OVERFITTING_FIX.md](OVERFITTING_FIX.md) for details.
+
 #### Quick Start (Local Training)
 
 Train with default settings (4 experts, joint training on Code Alpaca + MBPP):
 
 ```bash
-python train.py --bf16 --num_epochs 10
+python train.py --bf16 --num_epochs 3
 ```
+
+**Recommended:** Use 3 epochs (instead of 10) to prevent overfitting, or rely on early stopping (enabled by default with patience=3).
 
 #### Custom Configuration
 
@@ -92,27 +96,26 @@ python train.py \
   --lora_r 32 \
   --lora_alpha 64 \
   --bf16 \
-  --num_epochs 10
+  --num_epochs 3
 
 # Use custom datasets (80k Evol-Instruct + MBPP)
 python train.py \
   --datasets "evol_instruct,mbpp" \
   --bf16 \
-  --num_epochs 10
+  --num_epochs 3
 
 # Large-scale training with multiple datasets (~180k examples)
 python train.py \
   --datasets "code_alpaca,evol_instruct,code_feedback,mbpp" \
   --bf16 \
-  --num_epochs 10 \
-  --balance_coefficient 0.01
+  --num_epochs 3
 
-# Quick test with data subset
+# Quick test with data subset (validation)
 python train.py \
   --training_subset 10 \
   --eval_subset 20 \
   --bf16 \
-  --num_epochs 3
+  --num_epochs 2
 ```
 
 ### Benchmarking
@@ -139,7 +142,7 @@ For containerized deployments, use the unified entrypoint that supports both tra
 
 ```bash
 # Training via container
-python entrypoint.py --train --datasets "code_alpaca,mbpp" --num_epochs 10
+python entrypoint.py --train --datasets "code_alpaca,mbpp" --num_epochs 3
 
 # Benchmarking via container  
 python entrypoint.py --benchmark --base-model --max-samples 164
@@ -165,8 +168,8 @@ Available datasets (use with `--datasets "dataset1,dataset2,..."`):
 - `--num_experts`: Number of LoRA experts (default: 4)
 - `--lora_r`: LoRA rank (default: 16)
 - `--lora_alpha`: LoRA alpha scaling (default: 32)
-- `--lora_dropout`: LoRA dropout rate (default: 0.05)
-- `--num_epochs`: Training epochs (default: 10)
+- `--lora_dropout`: LoRA dropout rate (default: 0.1, increased for anti-overfitting)
+- `--num_epochs`: Training epochs (recommended: 2-3 with early stopping)
 - `--training_subset`: Percentage of training data to use
 - `--eval_subset`: Percentage of eval data to use
 - `--bf16`: Use BF16 mixed precision (recommended)
@@ -187,7 +190,7 @@ python train.py \
   --wandb_checkpoint_artifact "johnrcumming/dylo-moe-full-training/best-dylora-model-full:v0" \
   --datasets "code_alpaca,mbpp" \
   --bf16 \
-  --num_epochs 10
+  --num_epochs 3
 
 # For Vertex AI: Edit submit_full_training.py
 # Set: WANDB_CHECKPOINT_ARTIFACT = "username/project/artifact:version"
