@@ -1,5 +1,24 @@
 # Overfitting Fix - Increasing Eval Loss
 
+## ✅ IMPLEMENTATION STATUS
+
+**As of 2026-01-15, the following fixes have been implemented as DEFAULT values in `train.py`:**
+
+- ✅ **Label smoothing**: `0.1` (previously `0.0`)
+- ✅ **Weight decay**: `0.05` (previously `0.01`)
+- ✅ **LoRA dropout**: `0.1` (previously `0.05`)
+
+**No additional flags needed** - these are now the defaults. You can still override them if needed:
+- To disable: `--label_smoothing 0.0`
+- To increase: `--weight_decay 0.1` or `--lora_dropout 0.15`
+
+**Next Steps:**
+1. Run training with default parameters to validate the fix
+2. Monitor W&B for eval loss convergence (gap < 0.2 from training loss)
+3. Compare HumanEval/MBPP scores with baseline
+
+---
+
 ## Problem
 Training loss: **0.78** (decreasing) ✓  
 Eval loss: **1.04 → 1.05 → 1.07** (increasing) ✗
@@ -56,14 +75,12 @@ python train.py \
   --lr_strategy cosine \
   --train_batch_size 4 \
   --gradient_accumulation_steps 8 \
-  --label_smoothing 0.1 \
-  --weight_decay 0.05 \
-  --lora_dropout 0.1 \
   --balance_coefficient 0.3 \
   --max_seq_length 1024 \
   --bf16 \
   --output_dir ./models/dylora-overfitting-fix
 ```
+**Note:** `label_smoothing`, `weight_decay`, and `lora_dropout` are now set to optimal values by default (0.1, 0.05, 0.1 respectively).
 
 ### For Quick Testing (Local)
 ```bash
@@ -72,11 +89,9 @@ python train.py \
   --eval_subset 20 \
   --num_epochs 2 \
   --num_experts 2 \
-  --label_smoothing 0.1 \
-  --weight_decay 0.05 \
-  --lora_dropout 0.1 \
   --bf16
 ```
+**Note:** All anti-overfitting defaults are already applied. Just specify your data and architecture parameters.
 
 ## Expected Results
 
